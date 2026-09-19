@@ -1,0 +1,221 @@
+SPECTER - TESTING GUIDE + HACKATHON DEMO PLAYBOOK
+=================================================
+
+PART A. HOW TO TEST
+===================
+
+A1. Prerequisites
+-----------------
+  cp .env.example .env.local        # fill in real values
+  npm install
+  npm run dev                       # http://localhost:3000
+
+Required for a LIVE scan: GITHUB_TOKEN, the 3 Supabase keys, NEXT_PUBLIC_APP_URL=http://localhost:3000.
+Required for the AI panel: OPENROUTER_API_KEY or GEMINI_API_KEY.
+The two DEMO buttons need none of these (they load static JSON from public/demos).
+
+Supabase needs three tables (schema is not in the repo, create them first):
+  scans(id uuid pk default gen_random_uuid(), repo_url, repo_owner, repo_name, status, threat_score int,
+        created_at, completed_at)
+  findings(id, scan_id, scanner, severity, title, detail, package_name, file_path, line_number,
+           commit_sha, metadata jsonb)
+  scan_cache(repo_url text UNIQUE, dep_data jsonb, secret_data jsonb, docker_data jsonb, api_data jsonb,
+             env_data jsonb, threat_score int, expires_at timestamptz)
+  scan_cache.repo_url must be UNIQUE, otherwise the upsert in /run will not overwrite.
+
+Sanity check your GitHub token before testing:
+  curl -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/rate_limit
+  (should show a 5000/hr core limit, not 60)
+
+
+A2. Static checks (no keys needed)
+----------------------------------
+  npm run build     # type-checks with strict TS and compiles all routes
+  npm run lint      # may report warnings/errors (the code uses `any` in places); judge whether they matter
+There are no automated tests in the repo.
+
+
+A3. Test 1 - Offline demo mode (must always work)
+-------------------------------------------------
+1. Open /, click "event-stream attack".
+2. Expect: camera flies out, red particles stream from flatmap-stream to the core, threat score 96,
+   critical findings in the sidebar, red flash on load.
+3. Click "← NEW SCAN", then "node-ipc protest". Expect score 88.
+4. Click a dependency sphere: rotation pauses (selection works).
+5. Click EXPORT PDF: a Specter_Report_*.pdf downloads with the findings table.
+6. AI brief: appears only if an AI key is set. Without one the panel silently doesn't show; that's expected.
+Do NOT refresh on /scan/... (state lives in memory, the page will be blank; known gap).
+
+
+A4. Test 2 - Live scan, happy path
+----------------------------------
+Paste a small public Node repo, e.g. https://github.com/expressjs/express or any small npm project of yours.
+Expect:
+  - ScanLoader (radar + 5 scanner lines) for several seconds
+  - within about 10-60 s the sidebar slides in with a score, 5 green scanner badges, sorted findings
+  - 3D scene populated: dependency rings, commit spikes (if secrets), docker slabs, API spokes
+  - Supabase: 1 row in scans (completed), N rows in findings, 1 row in scan_cache with expires_at ~ +6 h
+Scan the SAME repo again: should return almost instantly (cache hit, new scans row, no /run call).
+
+
+A5. Test 3 - Build a deterministic "bad repo" (best for verifying every scanner)
+--------------------------------------------------------------------------------
+Create a throwaway PUBLIC GitHub repo (delete it after) containing FAKE values only:
+
+  package.json        depends on an old vulnerable version, e.g. "lodash": "4.17.15", "minimist": "1.2.0"
+  Dockerfile          FROM node:latest
+                      ENV API_TOKEN=abc123456789
+                      RUN curl https://example.com/x.sh | sh
+                      COPY . .
+                      EXPOSE 22
+                      CMD ["node","index.js"]                      (no USER line)
+  .env                DATABASE_URL=postgres://admin:hunter2secret@db.example.com:5432/app
+  src/app/api/admin/route.ts
+                      export async function POST(req){ return Response.json({ok:true}) }
+  no .gitignore       (or one without .env)
+  a commit containing a fake key, then a second commit deleting it, e.g.
+                      AWS_KEY = "AKIAIOSFODNN7EXAMPLE"    (AWS's documented example key)
+GitHub push protection may block secret-looking strings; if so use a generic pattern such as
+api_key = "aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1"  or allow the push for your own throwaway repo.
+
+Expected result per scanner:
+  DepChain     lodash/minimist nodes flagged with CVEs (red/amber spheres, particles to the core)
+  GhostCommit  finding for the key in the commit that ADDED it, even though HEAD no longer has it
+               (proves the "ghost" claim)
+  LayerScan    :latest, secret in ENV, curl|sh, COPY . ., port 22, missing USER (critical)
+  APIBleed     POST /api/admin flagged critical (write endpoint, no auth, admin path)
+  EnvTrace     .env committed with real-looking value (critical), .env missing from .gitignore (high)
+Score should be high (roughly 60-100).
+
+
+A6. Test 4 - Edge cases
+-----------------------
+  Repo with no Dockerfile          LayerScan badge OK, "NO DOCKERFILE" label in scene, no layer findings
+  Non-Node repo (Go/Rust/Python)   DepChain returns 0 nodes (only package.json is read); other scanners still work
+  Clean small repo                 low score, green "ALL CLEAR" if no findings
+  Invalid URL ("foo")              inline error message, HTTP 400 from /api/scan/start
+  Nonexistent / private repo       GitHub calls fail; most scanners return empty and the scan usually finishes
+                                   with score 0 rather than "failed" (known behavior; avoid on stage)
+  Huge monorepo                    slower, capped (APIBleed 35 files, EnvTrace 25 sources, GhostCommit 30 commits)
+  Rate limit                       6th scan from the same IP within an hour -> "Rate limit: 5 scans per hour"
+
+
+A7. Test 5 - Resilience (the "independent scanners" claim)
+----------------------------------------------------------
+Temporarily make one scanner throw (e.g. `throw new Error('x')` at the top of runGhostCommit) and scan.
+Expect: scan still completes, GhostCommit badge shows inactive ("—"), other results and score still render,
+no commit timeline in the scene. Revert the change afterwards.
+
+
+A8. Test 6 - API-level checks with curl
+---------------------------------------
+  # start
+  curl -X POST http://localhost:3000/api/scan/start -H "Content-Type: application/json" \
+       -d '{"repoUrl":"https://github.com/owner/repo"}'                      -> {"scanId":"..."}
+  # poll
+  curl http://localhost:3000/api/scan/<scanId>/status                        -> { scan, cache }
+  # internal route must reject without secret
+  curl -X POST http://localhost:3000/api/scan/<scanId>/run                   -> 401
+  curl -X POST http://localhost:3000/api/scan/<scanId>/run -H "x-internal-secret: <INTERNAL_SECRET>"   -> {ok:true,threatScore}
+  # AI
+  curl -X POST http://localhost:3000/api/explain -H "Content-Type: application/json" \
+       -d '{"findings":[{"scanner":"layerscan","title":"No USER","detail":"runs as root","severity":"critical"}]}'
+  # no crit/high findings -> returns the "clean security posture" summary without calling the LLM
+
+
+A9. Test 7 - Visual/perf
+------------------------
+  - Check on a laptop screen, a projector-resolution window, and a phone (mobile bottom sheet is draggable)
+  - Camera should not snap or stutter when data mounts; bloom is heavy on integrated GPUs, run plugged in
+  - Every element should be explainable: sphere size/colour = severity, particles only on vulnerable paths,
+    spike height = entropy
+
+
+PART B. HACKATHON DEMO PLAYBOOK
+===============================
+
+B1. Before you go on stage (checklist)
+--------------------------------------
+  [ ] Use a production build for smoothness: npm run build && npm run start (not npm run dev)
+  [ ] .env.local set, GITHUB_TOKEN verified (5000/hr), AI key works (test one scan end to end)
+  [ ] NEXT_PUBLIC_APP_URL matches where you're running (localhost or the Vercel URL)
+  [ ] PRE-WARM THE CACHE: scan your live-demo repo within the 6 hours before you present. A repeat scan is
+      served from scan_cache instantly, so the live path is fast and can't hit rate limits.
+  [ ] Rate limit is 5 scans/hour PER IP, and venue wifi often shares one IP. Restart the server before the
+      demo (limiter is in memory) and tell judges not to all scan at once, or raise the default in
+      src/lib/rateLimit.ts for the event.
+  [ ] Browser full screen, zoom 100%, extensions off, tabs closed, do a warm-up demo load so shaders compile
+  [ ] Keep a screen recording of the full flow (there is a YouTube demo link in the README) as fallback
+  [ ] Have one already-generated PDF and one Telegram alert screenshot ready
+  [ ] Do NOT refresh on a /scan page; use "NEW SCAN" to go back (state is in memory only)
+  [ ] Charge laptop, plug into power, disable notifications/sleep
+
+
+B2. Suggested 4-minute script
+-----------------------------
+0:00-0:30  HOOK (no screen yet)
+  "In 2018 a stranger took over event-stream, added flatmap-stream, and stole Bitcoin from Copay users. It sat
+  in production two months. Supply chain attacks are up 742% in two years. Dependabot tells you a CVE exists,
+  not whether it's exploitable in your repo; Snyk is priced for enterprises. Specter gives every developer
+  that visibility, free, in about ten seconds."
+
+0:30-1:30  SHOWSTOPPER: click "event-stream attack" (offline, cannot fail)
+  - Camera flies out. Point at the single red node: "This is flatmap-stream. Red particles only flow along the
+    path that carries the vulnerability to the root. That's the blast radius."
+  - "Node size and colour are severity. Nothing here is decoration."
+  - Read the score (96) and open the AI Intelligence Brief: what's dangerous, why, exact fix.
+
+1:30-2:30  PROVE IT'S REAL: paste your prepared repo URL and click SCAN
+  - The loader shows 5 scanners running in parallel. Say what each does in one line.
+  - Result arrives (fast if pre-warmed). Show the commit timeline: "Here's a secret that was committed, then
+    deleted. It's gone from HEAD but still recoverable in git history. GhostCommit found it via per-diff
+    entropy analysis."
+  - Click a finding, show the exact fix.
+
+2:30-3:15  ACTION + CONTINUITY
+  - EXPORT PDF (show the file).
+  - Show the n8n workflow / Telegram ping: "On every push it scans and alerts the team, so the next
+    event-stream is caught before it ships." (This workflow is external to the repo, so show it from your n8n
+    instance or screenshot.)
+
+3:15-4:00  ENGINEERING STORY (pick 2-3, judges love these)
+  - Real vuln vs noisy CVE: we build the resolved tree and query OSV by exact version.
+  - Secrets not in HEAD: diffs of past commits, not just the latest tree.
+  - Each scanner is independently failable (Promise.allSettled), so partial results still give a score and a
+    partial 3D scene.
+  - 3D rule: "if you can't explain why a shape is there, we cut it."
+  - Demo reliability: scripted real-attack dataset plus a genuine live path.
+  Close: "The ghosts in your codebase. Made visible."
+
+
+B3. Honest Q&A prep (know the limits before a judge finds them)
+---------------------------------------------------------------
+  Q: Is this reachability analysis?
+  A: Not full call-graph reachability. It resolves the actual tree and matches exact versions, which removes most
+     false positives; deeper reachability is future work.
+  Q: Does it scan the whole git history?
+  A: Currently the latest 30 commits, chosen for speed and GitHub rate limits. Pagination and caching make full
+     history a straightforward extension.
+  Q: Which ecosystems?
+  A: npm today (package.json). The tree builder and OSV query are ecosystem-parameterised, so PyPI/Go are next.
+  Q: Private repos?
+  A: Public repos today. Private support needs user OAuth tokens.
+  Q: False positives on secrets?
+  A: Entropy plus known-format regex, lockfiles and binaries excluded, previews masked. Some noise is possible.
+  Q: How do you avoid GitHub rate limits?
+  A: Token auth, per-scan file cache, small delays, capped file counts, per-IP limiting, 6-hour result cache.
+  Q: Is the AI making up findings?
+  A: No. The scanners produce the findings; the LLM only explains them, from the top critical/high items.
+  Q: Why is the score what it is?
+  A: Capped weighted sum (secrets, vulnerable packages, Docker/env severity, unauth APIs), so no scanner
+     dominates. Show the formula in flow.txt section 5 if pressed.
+
+
+B4. If something breaks on stage
+--------------------------------
+  Live scan slow or errors   -> say "that's GitHub rate limiting, which is exactly why we shipped a scripted
+                                dataset", click the demo button, continue.
+  Blank 3D scene / GPU lag    -> close other tabs, drop window size; worst case switch to the screen recording.
+  AI brief missing            -> AI key/model issue; findings, score and PDF still work. Move on.
+  Rate limit message          -> restart the server (clears in-memory limiter) or use the demos.
+  Accidentally refreshed      -> go to /, use the demo buttons again.

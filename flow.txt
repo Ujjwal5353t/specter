@@ -1,0 +1,185 @@
+SPECTER - PROJECT FLOW (brief)
+================================
+
+1. THE PROBLEM
+--------------
+Developers don't know what actually runs inside the packages they install. The 2018
+event-stream attack showed why: a maintainer handed the package to a stranger, who
+slipped a Bitcoin-stealing backdoor into a sub-dependency (flatmap-stream). It sat in
+Copay's production code for ~2 months. Dependabot only says "a CVE exists", not whether
+it matters in your repo; enterprise tools (Snyk etc.) are priced for SOC teams.
+
+Specter = free, real-time, visual threat intelligence for any public GitHub repo in
+roughly 10 seconds. Paste a URL, get a 0-100 threat score, a 3D map of the attack
+surface, plain-English fixes, and a PDF report.
+
+
+2. STACK
+--------
+Frontend : Next.js 16 (App Router), React 19, Tailwind v4, framer-motion, Zustand
+3D       : three.js via react-three-fiber / drei / postprocessing (bloom)
+Backend  : Next.js API routes (Vercel, 60 s max), Octokit (GitHub REST API)
+Data     : Supabase Postgres (scans, findings, scan_cache); OSV.dev (CVEs); npm registry
+AI       : OpenRouter (default, free model) or Gemini 2.0 Flash
+Alerts   : n8n workflow (external, not in this repo) -> Telegram on push events
+PDF      : jsPDF + jspdf-autotable, generated in the browser
+
+
+3. END-TO-END FLOW
+------------------
+[Landing page  /]
+  user pastes https://github.com/owner/repo
+  -> POST /api/scan/start
+
+[/api/scan/start]
+  1. per-IP rate limit (5 scans/hour, in-memory)
+  2. parseRepoUrl -> owner/repo, normalise to lowercase URL
+  3. check scan_cache for a row < 6 hours old
+       HIT  -> insert a 'completed' scans row, return scanId immediately
+       MISS -> insert scans row (status 'scanning')
+  4. fire POST /api/scan/{id}/run with x-internal-secret (waits max 3 s just to be sure
+     the request left; it does NOT wait for the scan)
+  5. return { scanId }
+
+[Client]
+  stores scanId, starts polling GET /api/scan/{id}/status every 3 s,
+  routes to /scan/{id} and shows the ScanLoader (radar + 5 scanner lines)
+
+[/api/scan/{id}/run]   <- the actual work
+  1. verify secret, load scan row, clear the per-scan GitHub file cache
+  2. run the 5 scanners CONCURRENTLY with Promise.allSettled
+       a scanner that throws/times out becomes null; the others still count
+  3. compute threat score (see section 5)
+  4. flatten all results into rows -> insert into 'findings'
+  5. mark scan 'completed' with score, upsert raw per-scanner JSON into scan_cache
+     (6 h TTL). On an unexpected error the scan is marked 'failed'.
+
+[Client polling sees 'completed']
+  builds ScanResult from scan + scan_cache, stops polling ->
+  3D scene populates, sidebar slides in, screen flashes by threat level
+
+[Results page  /scan/{id}]
+  - ThreatScore (animated count-up, colour by band), ScannerBadges, FindingsList
+    (sorted by severity, expandable)
+  - once complete, the page POSTs findings to /api/explain -> LLM -> AI Intelligence
+    Brief (summary + per-finding: why dangerous, exact fix, real-world example)
+  - EXPORT PDF -> table of findings + AI summary/top 3 fixes, saved locally
+
+[Demo path]
+  two buttons load public/demos/event-stream.json (2018) and node-ipc.json (2022)
+  straight into the store. No API, no GitHub, no Supabase: the on-stage showstopper
+  can't be broken by rate limits or bad Wi-Fi. The live path stays available to prove
+  it's real.
+
+
+4. THE FIVE SCANNERS (all take owner, repo)
+-------------------------------------------
+DepChain    Reads package.json (first 25 deps + devDeps). Recursively pulls each package's
+            own dependencies from the npm registry (depth 3, up to 10 children each),
+            building a real tree with edges. Batch-queries OSV.dev (50 packages/request)
+            for known vulns, maps CVSS -> critical/high/medium/low, records fixed_in.
+            Output: nodes (with CVEs), edges, vulnCount. This is what lets the scene show
+            WHERE in the tree a bad package enters.
+
+GhostCommit Takes the latest 30 commits, fetches each diff, examines only ADDED lines.
+            Uses 11 regex patterns (AWS, GitHub, Stripe, OpenAI, Anthropic, JWT, private
+            keys, Slack, DB URLs, generic API keys) plus Shannon-entropy detection
+            (> 4.5 on 20-120 char tokens). Skips lockfiles/binaries/minified files to cut
+            noise. Catches secrets that were committed once and "removed" later, since the
+            diff that introduced them is still in history. Previews are masked.
+
+LayerScan   Locates a Dockerfile (5 candidate paths, fetched in parallel), parses it, flags:
+            :latest/unpinned base, no USER (runs as root), curl|sh, secrets in ENV/RUN,
+            dangerous exposed ports, ADD <url>, COPY . ., npm install vs ci, single-stage
+            builds. Each finding has a concrete fix.
+
+APIBleed    Walks the repo tree for route-like files, detects endpoints (Next.js route.ts,
+            Express, FastAPI, Flask), and checks for auth hints nearby. Flags write
+            endpoints without auth, admin/debug/internal/secret/config paths, CORS "*",
+            and missing rate limiting.
+
+EnvTrace    Finds committed .env files (real values = critical, placeholders = medium),
+            missing .env in .gitignore, real-looking values in .env.example, and
+            hardcoded credentials in up to 25 source files.
+
+Each uses a cached GitHub file fetcher and small sleeps between calls to respect
+GitHub rate limits.
+
+
+5. THREAT SCORE (0-100)
+-----------------------
+  min(EnvTrace + LayerScan severity points, 40)     critical 15, high 8, medium 4, low 1
++ min(vulnerable packages * 8, 30)
++ min(secrets found * 10, 20)
++ min(unauthenticated write endpoints * 5, 10)
+  capped at 100.
+Every category is capped so no single noisy scanner can dominate the number. Partial
+results (a failed scanner) still produce a valid score.
+
+
+6. THE 3D SCENE (every shape maps to a signal)
+----------------------------------------------
+A single persistent canvas sits behind all pages; the camera glides from a slow idle
+orbit to a wider tactical view when results arrive.
+  Core sphere/ring  the repo; colour = score band (blue < 40, amber, red > 70)
+  DepGraph          direct deps on an inner ring, transitive deps on an outer ring.
+                    Vulnerable nodes glow amber/red with a wireframe halo; edges into
+                    them turn red. Click a node to select and pause rotation.
+  AttackPaths       red particle streams flow from each vulnerable package to the repo
+                    root. Clean packages have no particles, so the blast radius is
+                    visible at a glance.
+  CommitTimeline    a bar along the bottom, one spike per leaked secret; height =
+                    entropy, label = secret type.
+  DockerLayers      a stack of slabs; flagged layers turn amber/red.
+  ApiSpokes         endpoints as spokes around the repo; red = critical, amber = risky,
+                    green = authed.
+  Threat light      a pulsing red/orange light when score is high.
+Rule: if you can't explain why a shape is there, cut it.
+
+
+7. HOW IT SOLVES THE HARD PARTS
+-------------------------------
+Real vuln vs noisy CVE   Builds the resolved dependency tree from the registry and
+                         queries OSV with the concrete package version, so only
+                         matching-version vulnerabilities are counted, not every CVE
+                         ever filed for a package name.
+Secrets not in HEAD      Scans the diffs of past commits, not just the latest tree.
+Reliability under time   allSettled: each scanner fails alone. Score and 3D scene
+                         degrade gracefully.
+GitHub rate limits       Token auth, per-scan file cache, per-request delays, file caps,
+                         per-IP rate limit, and a 6-hour result cache in Supabase.
+Stage-proof demo         Pre-baked real-attack datasets + a live path.
+Beyond raw data          LLM turns findings into what's dangerous / why / the exact fix,
+                         and PDF export makes it shareable.
+Continuous protection    n8n watches push events and pings Telegram when a scan
+                         finishes (external workflow).
+
+
+8. DATA MODEL (Supabase)
+------------------------
+scans       id, repo_url, repo_owner, repo_name, status (pending|scanning|completed|
+            failed), threat_score, completed_at
+findings    one row per finding: scan_id, scanner, severity, title, detail, file_path,
+            line_number, commit_sha, package_name, metadata (json)
+scan_cache  repo_url (unique), dep_data, secret_data, docker_data, api_data, env_data,
+            threat_score, expires_at (now + 6 h). This is what the UI actually reads.
+(Schema SQL is not stored in the repo.)
+
+
+9. SETUP
+--------
+  cp .env.example .env.local   (fill in GITHUB_TOKEN, Supabase keys, an AI key,
+                                NEXT_PUBLIC_APP_URL=http://localhost:3000)
+  npm install
+  npm run dev
+
+
+10. KNOWN GAPS
+--------------
+- /scan/{id} works only from in-app navigation; refresh or a shared link shows nothing
+  (state lives in the Zustand store, not re-fetched by id).
+- DepChain uses declared version ranges from npm, not a lockfile; npm ecosystem only.
+- GhostCommit covers the latest 30 commits, not the full history.
+- Rate limiter is in-memory (best-effort on serverless).
+- Failed scanners show as inactive badges, not as explicit errors.
+- n8n/Telegram workflow lives outside this repo.
