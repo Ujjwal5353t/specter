@@ -6,20 +6,29 @@ import { runGhostCommit } from '@/lib/scanners/ghostcommit';
 import { runLayerScan } from '@/lib/scanners/layerscan';
 import { runAPIBleed } from '@/lib/scanners/apibleed';
 import { runEnvTrace } from '@/lib/scanners/envtrace';
+import type {
+  DepChainResult, GhostCommitResult, LayerScanResult, APIBleedResult, EnvTraceResult, Severity,
+} from '@/types';
 
 export const maxDuration = 60;
 
-function calcThreatScore(r: {
-  depchain: any; ghostcommit: any; layerscan: any; apibleed: any; envtrace: any;
-}): number {
-  const sevWeight: Record<string, number> = {
+interface ScanResults {
+  depchain: DepChainResult | null;
+  ghostcommit: GhostCommitResult | null;
+  layerscan: LayerScanResult | null;
+  apibleed: APIBleedResult | null;
+  envtrace: EnvTraceResult | null;
+}
+
+function calcThreatScore(r: ScanResults): number {
+  const sevWeight: Record<Severity, number> = {
     critical: 15, high: 8, medium: 4, low: 1, info: 0,
   };
 
   const envFindings = r.envtrace?.findings ?? [];
   const layerFindings = r.layerscan?.findings ?? [];
-  const envScore = envFindings.reduce((acc: number, f: any) => acc + (sevWeight[f.severity] ?? 0), 0);
-  const layerScore = layerFindings.reduce((acc: number, f: any) => acc + (sevWeight[f.severity] ?? 0), 0);
+  const envScore = envFindings.reduce((acc, f) => acc + (sevWeight[f.severity] ?? 0), 0);
+  const layerScore = layerFindings.reduce((acc, f) => acc + (sevWeight[f.severity] ?? 0), 0);
 
   const vulnDeps = r.depchain?.vulnCount ?? 0;
   const secrets = r.ghostcommit?.findings?.length ?? 0;
@@ -68,7 +77,7 @@ export async function POST(
       runEnvTrace(owner, repo),
     ]);
 
-    const results = {
+    const results: ScanResults = {
       depchain:    dep.status    === 'fulfilled' ? dep.value    : null,
       ghostcommit: ghost.status  === 'fulfilled' ? ghost.value  : null,
       layerscan:   layer.status  === 'fulfilled' ? layer.value  : null,
@@ -79,29 +88,29 @@ export async function POST(
     const threatScore = calcThreatScore(results);
 
     const allFindings = [
-      ...(results.depchain?.nodes?.filter((n: any) => n.cves?.length > 0).flatMap((n: any) =>
-        n.cves.map((c: any) => ({
+      ...(results.depchain?.nodes?.filter((n) => n.cves?.length > 0).flatMap((n) =>
+        n.cves.map((c) => ({
           scan_id: scanId, scanner: 'depchain', severity: c.severity,
           title: `Vulnerable: ${n.name}@${n.version}`, detail: c.summary,
           package_name: n.name, metadata: { cve_id: c.id, score: c.score, fixed_in: c.fixed_in },
         }))
       ) ?? []),
-      ...(results.ghostcommit?.findings?.map((f: any) => ({
-        scan_id: scanId, scanner: 'ghostcommit', severity: 'critical',
+      ...(results.ghostcommit?.findings?.map((f) => ({
+        scan_id: scanId, scanner: 'ghostcommit', severity: 'critical' as const,
         title: `${f.type} in commit`, detail: `${f.file}:${f.line} — entropy ${f.entropy.toFixed(2)}`,
         file_path: f.file, line_number: f.line, commit_sha: f.commit_sha,
         metadata: { author: f.author, preview: f.preview },
       })) ?? []),
-      ...(results.layerscan?.findings?.map((f: any) => ({
+      ...(results.layerscan?.findings?.map((f) => ({
         scan_id: scanId, scanner: 'layerscan', severity: f.severity,
         title: f.issue.substring(0, 100), detail: f.fix, metadata: { layer: f.layer },
       })) ?? []),
-      ...(results.apibleed?.endpoints?.filter((e: any) => e.issues.length > 0).map((e: any) => ({
+      ...(results.apibleed?.endpoints?.filter((e) => e.issues.length > 0).map((e) => ({
         scan_id: scanId, scanner: 'apibleed', severity: e.severity,
         title: `${e.method} ${e.path}`, detail: e.issues.join(' | '),
         file_path: e.file, metadata: { hasAuth: e.hasAuth },
       })) ?? []),
-      ...(results.envtrace?.findings?.map((f: any) => ({
+      ...(results.envtrace?.findings?.map((f) => ({
         scan_id: scanId, scanner: 'envtrace', severity: f.severity,
         title: f.type.replace(/_/g, ' '), detail: f.detail,
         file_path: f.file, line_number: f.line,

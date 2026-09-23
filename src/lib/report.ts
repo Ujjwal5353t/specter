@@ -2,13 +2,19 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import type { ScanResult } from '@/types';
 
+// jspdf-autotable augments the jsPDF instance with `lastAutoTable` at
+// runtime; the base jsPDF type doesn't declare it.
+interface JsPDFWithAutoTable extends jsPDF {
+  lastAutoTable: { finalY: number };
+}
+
 export function generateReport(r: ScanResult): void {
   const doc = new jsPDF();
   const now = new Date().toLocaleString();
 
   // Header
   doc.setFontSize(22);
-  doc.setTextColor(239, 68, 68); // Tailwind red-500
+  doc.setTextColor(255, 42, 109); // Specter crimson
   doc.text('SPECTER', 14, 20);
   
   doc.setFontSize(11);
@@ -58,15 +64,15 @@ export function generateReport(r: ScanResult): void {
     didParseCell: (data) => {
       if (data.section === 'body' && data.column.index === 1) {
         const sev = data.cell.raw as string;
-        if (sev === 'CRITICAL') data.cell.styles.textColor = [239, 68, 68];
-        else if (sev === 'HIGH') data.cell.styles.textColor = [249, 115, 22];
+        if (sev === 'CRITICAL') data.cell.styles.textColor = [255, 42, 109];
+        else if (sev === 'HIGH') data.cell.styles.textColor = [245, 158, 11];
         else if (sev === 'MEDIUM') data.cell.styles.textColor = [234, 179, 8];
       }
     },
   });
 
   // Inject AI Intelligence Brief if available
-  let finalY = (doc as any).lastAutoTable.finalY + 15;
+  let finalY = (doc as JsPDFWithAutoTable).lastAutoTable.finalY + 15;
 
   if (r.aiExplanation) {
     // Check if we need a page break before starting the AI section
@@ -76,7 +82,7 @@ export function generateReport(r: ScanResult): void {
     }
 
     doc.setFontSize(12);
-    doc.setTextColor(239, 68, 68);
+    doc.setTextColor(255, 42, 109);
     doc.text('▶ AI INTELLIGENCE BRIEF', 14, finalY);
 
     doc.setFontSize(9);
@@ -99,7 +105,7 @@ export function generateReport(r: ScanResult): void {
       }
       
       doc.setFontSize(9);
-      doc.setTextColor(239, 68, 68);
+      doc.setTextColor(255, 42, 109);
       doc.text(`${i + 1}. ${item.title}`, 14, finalY);
       
       doc.setTextColor(80, 80, 80);

@@ -3,20 +3,22 @@ import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 export default function ThreatFlash({ score }: { score: number }) {
-  const [show, setShow] = useState(false);
+  // Lazy initializer computes visibility directly from the prop at mount
+  // time — ThreatFlash only ever mounts once per scan (its parent renders
+  // it conditionally on `isReady`), so this replaces a setState-in-effect
+  // that only ever mirrored the prop into state.
+  const [show, setShow] = useState(() => score > 10);
 
   useEffect(() => {
-    if (score > 10) {
-      setShow(true);
-      const t = setTimeout(() => setShow(false), 800);
-      return () => clearTimeout(t);
-    }
-  }, [score]);
+    if (!show) return;
+    const t = setTimeout(() => setShow(false), 800);
+    return () => clearTimeout(t);
+  }, [show]);
 
   const color = score > 70
-    ? 'rgba(239, 68, 68, 0.12)'
+    ? 'rgba(255, 42, 109, 0.12)'
     : score > 40
-    ? 'rgba(249, 115, 22, 0.08)'
+    ? 'rgba(245, 158, 11, 0.08)'
     : 'rgba(234, 179, 8, 0.06)';
 
   return (

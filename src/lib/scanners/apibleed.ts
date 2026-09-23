@@ -55,7 +55,7 @@ function analyzeFile(content: string, filepath: string): ApiEndpoint[] {
   }
 
   // Framework route patterns
-  for (const { re, fw } of ROUTE_PATTERNS) {
+  for (const { re } of ROUTE_PATTERNS) {
     re.lastIndex = 0;
     for (const match of content.matchAll(re)) {
       const method = (match[1] ?? 'GET').toUpperCase();

@@ -22,7 +22,7 @@ export default function CommitTimeline({ findings }: Props) {
   return (
     <group position={[0, -80, 0]}>
       <Box args={[280, 0.4, 0.4]}>
-        <meshStandardMaterial color="#3b82f6" transparent opacity={0.5} />
+        <meshStandardMaterial color="#00F0FF" transparent opacity={0.5} />
       </Box>
       <Text position={[-148, 5, 0]} fontSize={4} color="#ffffff" outlineWidth={0.2} outlineColor="#000000">
         COMMIT HISTORY
@@ -35,7 +35,7 @@ export default function CommitTimeline({ findings }: Props) {
           return (
             <group key={i} position={[x, 0, 0]}>
               <Box args={[2.5, height, 2.5]}>
-                <meshStandardMaterial color="#ef4444" emissive="#ef4444" emissiveIntensity={0.85} transparent opacity={0.9} />
+                <meshStandardMaterial color="#FF2A6D" emissive="#FF2A6D" emissiveIntensity={0.85} transparent opacity={0.9} />
               </Box>
               <Billboard follow>
                 <Text 

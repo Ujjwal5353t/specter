@@ -5,6 +5,18 @@ const REGISTRY_BASE = 'https://registry.npmjs.org';
 const OSV_API = 'https://api.osv.dev/v1/querybatch';
 const npmCache = new Map<string, Record<string, string>>();
 
+interface OSVSeverity { type?: string; score: number | string; }
+interface OSVEvent { introduced?: string; fixed?: string; last_affected?: string; limit?: string; }
+interface OSVAffected { ranges?: { events?: OSVEvent[] }[]; }
+interface OSVVuln {
+  id: string;
+  summary?: string;
+  details?: string;
+  severity?: OSVSeverity[];
+  database_specific?: { severity?: string };
+  affected?: OSVAffected[];
+}
+
 function severityFromScore(score: number): Severity {
   if (score >= 9.0) return 'critical';
   if (score >= 7.0) return 'high';
@@ -87,23 +99,23 @@ async function queryOSV(packages: { name: string; version: string }[]): Promise<
       });
       const data = await res.json();
       (data.results ?? []).forEach(
-        (result: { vulns?: any[] }, idx: number) => {
+        (result: { vulns?: OSVVuln[] }, idx: number) => {
           const pkg = batch[idx];
           const cves: CVE[] = (result.vulns ?? []).map((v) => {
             // OSV returns severity as an array of objects with type and score
             // CVSS score can be nested under severity[].score (numeric)
             // or as a string in database_specific or ecosystem_specific
             let score = 5.0;
-            if (v.severity?.length > 0) {
+            if (v.severity && v.severity.length > 0) {
               // Try numeric score first
-              const numericSev = v.severity.find((s: any) => typeof s.score === 'number');
+              const numericSev = v.severity.find((s) => typeof s.score === 'number');
               if (numericSev) {
-                score = numericSev.score;
+                score = numericSev.score as number;
               } else {
                 // CVSS string score — parse the base score from the vector
-                const stringSev = v.severity.find((s: any) => typeof s.score === 'string');
+                const stringSev = v.severity.find((s) => typeof s.score === 'string');
                 if (stringSev?.score) {
-                  const match = stringSev.score.match(/\/(\d+\.\d+)$/);
+                  const match = (stringSev.score as string).match(/\/(\d+\.\d+)$/);
                   if (match) score = parseFloat(match[1]);
                 }
               }
@@ -125,7 +137,7 @@ async function queryOSV(packages: { name: string; version: string }[]): Promise<
               severity: severityFromScore(score),
               score,
               summary,
-              fixed_in: v.affected?.[0]?.ranges?.[0]?.events?.find((e: any) => e.fixed)?.fixed,
+              fixed_in: v.affected?.[0]?.ranges?.[0]?.events?.find((e) => e.fixed)?.fixed,
             };
           });
           if (cves.length > 0) cveMap.set(`${pkg.name}@${pkg.version}`, cves);

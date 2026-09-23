@@ -1,5 +1,5 @@
 'use client';
-import ThreatScore from '@/components/ui/ThreatScore';
+import ThreatGauge from '@/components/ui/ThreatGauge';
 import ScannerBadges from '@/components/ui/ScannerBadges';
 import FindingsList from '@/components/ui/FindingsList';
 import AIPanel from '@/components/ui/AIPanel';
@@ -11,25 +11,128 @@ import { useParams, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useScanStore } from '@/store/scanStore';
 import { generateReport } from '@/lib/report';
+import type { ScanResult } from '@/types';
 
-const SCANNER_LABELS: Record<string, string> = {
-  depchain: 'DepChain', ghostcommit: 'GhostCommit', layerscan: 'LayerScan',
-  apibleed: 'APIBleed', envtrace: 'EnvTrace',
-};
+interface SidebarProps {
+  scanResult: ScanResult;
+  scannerFilter: string | null;
+  onFilterChange: (scanner: string | null) => void;
+  onExportPdf: () => void;
+  pdfLoading: boolean;
+}
+
+// Extracted to module scope (was previously declared inside ScanPage's body,
+// which recreated it — and remounted the whole sidebar, losing expanded-
+// finding state and replaying every entrance animation — on every unrelated
+// re-render, e.g. dragging the mobile sheet).
+function ScanSidebar({ scanResult, scannerFilter, onFilterChange, onExportPdf, pdfLoading }: SidebarProps) {
+  return (
+    <>
+      <div className="scan-line-effect absolute inset-0 pointer-events-none z-10 overflow-hidden rounded-none" />
+      <div className="px-5 md:pt-16 pt-2 pb-4 shrink-0 relative z-20" style={{ borderBottom: '1px solid var(--border)' }}>
+        <div className="absolute top-4 right-5 z-20">
+          <button
+            onClick={onExportPdf}
+            disabled={pdfLoading}
+            className="tactical-btn group flex items-center gap-2 px-3 py-1.5 rounded-sm cursor-pointer disabled:opacity-60"
+            style={{ color: 'var(--ink)' }}
+          >
+            {pdfLoading ? (
+              <span className="w-2.5 h-2.5 rounded-full border-2 border-t-transparent animate-spin" style={{ borderColor: 'var(--accent-hi) transparent transparent transparent' }} />
+            ) : (
+              <svg width="11" height="11" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M6 1v7M3 6l3 3 3-3M2 10h8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+              </svg>
+            )}
+            <span className="font-mono text-[10px] tracking-wider">{pdfLoading ? 'EXPORTING…' : 'EXPORT PDF'}</span>
+          </button>
+        </div>
+        <ThreatGauge result={scanResult} />
+      </div>
+
+      <div className="px-5 py-3 shrink-0 relative z-20" style={{ borderBottom: '1px solid var(--border)' }}>
+        <ScannerBadges result={scanResult} activeFilter={scannerFilter} onFilterChange={onFilterChange} />
+      </div>
+
+      <div className="flex-1 overflow-y-auto relative z-20">
+        <FindingsList
+          result={scanResult}
+          scannerFilter={scannerFilter}
+          hasAiExplanation={!!scanResult.aiExplanation}
+          onRequestAiFocus={() => document.getElementById('ai-intelligence-brief')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+        />
+        {scanResult.aiExplanation && (
+          <div id="ai-intelligence-brief">
+            <AIPanel explanation={scanResult.aiExplanation} />
+          </div>
+        )}
+      </div>
+
+      <div
+        className="px-5 py-2.5 shrink-0 flex items-center justify-between relative z-20 bg-void/50 backdrop-blur-sm"
+        style={{ borderTop: '1px solid var(--border)' }}
+      >
+        <span className="font-mono text-[9px]" style={{ color: 'var(--muted)' }}>
+          {scanResult.repoUrl.replace('https://github.com/', '')}
+        </span>
+        <div className="w-1.5 h-1.5 rounded-full animate-threat-pulse" style={{ background: 'var(--safe)', boxShadow: '0 0 4px rgba(34,197,94,0.6)' }} />
+      </div>
+    </>
+  );
+}
 
 export default function ScanPage() {
   const params = useParams();
   const router = useRouter();
-  const { scanResult, isPolling, isLoading, error, reset } = useScanStore();
+  const { scanResult, isPolling, isLoading, error, reset, startPolling, setScanResult, setError } = useScanStore();
   const aiRef = useRef<{ fetched: boolean }>({ fetched: false });
-  
-  // ── SLIDER STATE FOR MOBILE ──
+  const hydrateRef = useRef(false);
+
   const [isMobileExpanded, setIsMobileExpanded] = useState(false);
+  const [scannerFilter, setScannerFilter] = useState<string | null>(null);
+  const [pdfLoading, setPdfLoading] = useState(false);
 
   const handleBack = () => {
     reset();
     router.push('/');
   };
+
+  // Rehydrate on a direct visit / page refresh: the store only lives in
+  // memory, so opening /scan/[id] with nothing loaded (no prior /start or
+  // demo click in this session) previously just rendered blank forever.
+  useEffect(() => {
+    const scanId = params.scanId as string;
+    if (!scanId || hydrateRef.current) return;
+    if (scanResult || isPolling || isLoading) return;
+    hydrateRef.current = true;
+
+    (async () => {
+      try {
+        const res = await fetch(`/api/scan/${scanId}/status`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.scan?.status === 'completed') {
+          setScanResult({
+            scanId,
+            repoUrl: data.scan.repo_url,
+            status: 'completed',
+            threatScore: data.scan.threat_score ?? 0,
+            depchain: data.cache?.dep_data ?? undefined,
+            ghostcommit: data.cache?.secret_data ?? undefined,
+            layerscan: data.cache?.docker_data ?? undefined,
+            apibleed: data.cache?.api_data ?? undefined,
+            envtrace: data.cache?.env_data ?? undefined,
+          });
+        } else if (data.scan?.status === 'scanning' || data.scan?.status === 'pending') {
+          startPolling(scanId);
+        } else if (data.scan?.status === 'failed') {
+          setError('Scan failed. The repo may be private or the URL is incorrect.');
+        }
+      } catch {
+        /* leave state as-is on a transient error */
+      }
+    })();
+  }, [params.scanId, scanResult, isPolling, isLoading, setScanResult, startPolling, setError]);
 
   useEffect(() => {
     if (!scanResult || scanResult.status !== 'completed' || aiRef.current.fetched) return;
@@ -54,64 +157,22 @@ export default function ScanPage() {
         })
         .catch(() => {});
     }
-  }, [scanResult?.status]);
+    // `aiRef.current.fetched` guards against re-firing when `scanResult`
+    // changes again after the AI explanation merges back in below.
+  }, [scanResult]);
+
+  const handleExportPdf = async () => {
+    if (!scanResult) return;
+    setPdfLoading(true);
+    try {
+      await Promise.resolve();
+      generateReport(scanResult);
+    } finally {
+      setTimeout(() => setPdfLoading(false), 400);
+    }
+  };
 
   const isReady = !!scanResult;
-
-  const SidebarContent = () => (
-    <>
-      <div className="scan-line-effect absolute inset-0 pointer-events-none z-10 overflow-hidden rounded-none" />
-      <div className="px-5 md:pt-16 pt-2 pb-4 shrink-0 relative z-20" style={{ borderBottom: '1px solid var(--border)' }}>
-        <div className="absolute top-4 right-5 z-20">
-          <button
-            onClick={() => generateReport(scanResult!)}
-            className="group flex items-center gap-2 px-3 py-1.5 rounded transition-all duration-200 cursor-pointer"
-            style={{
-              background: 'var(--surface)',
-              border: '1px solid var(--border-hi)',
-              color: 'var(--ink)',
-            }}
-            onMouseEnter={e => {
-              e.currentTarget.style.borderColor = 'var(--accent-hi)';
-              e.currentTarget.style.color = 'var(--white)';
-            }}
-            onMouseLeave={e => {
-              e.currentTarget.style.borderColor = 'var(--border-hi)';
-              e.currentTarget.style.color = 'var(--ink)';
-            }}
-          >
-            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M6 1v7M3 6l3 3 3-3M2 10h8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
-            </svg>
-            <span className="font-mono text-[10px] tracking-wider">EXPORT PDF</span>
-          </button>
-        </div>
-        <ThreatScore score={scanResult!.threatScore} repoUrl={scanResult!.repoUrl} />
-      </div>
-
-      <div className="px-5 py-3 shrink-0 relative z-20" style={{ borderBottom: '1px solid var(--border)' }}>
-        <ScannerBadges result={scanResult!} />
-      </div>
-
-      <div className="flex-1 overflow-y-auto relative z-20">
-        <FindingsList result={scanResult!} />
-        {scanResult!.aiExplanation && <AIPanel explanation={scanResult!.aiExplanation} />}
-      </div>
-
-      <div
-        className="px-5 py-2.5 shrink-0 flex items-center justify-between relative z-20 bg-void/50 backdrop-blur-sm"
-        style={{ borderTop: '1px solid var(--border)' }}
-      >
-        <span className="font-mono text-[9px]" style={{ color: 'var(--muted)' }}>
-          {scanResult!.repoUrl.replace('https://github.com/', '')}
-        </span>
-        <div
-          className="w-1.5 h-1.5 rounded-full animate-threat-pulse"
-          style={{ background: 'var(--safe)', boxShadow: '0 0 4px rgba(34,197,94,0.6)' }}
-        />
-      </div>
-    </>
-  );
 
   return (
     <main className="relative w-full h-screen overflow-hidden bg-transparent">
@@ -119,41 +180,31 @@ export default function ScanPage() {
 
       <button
         onClick={handleBack}
-        className="absolute top-6 left-6 z-50 flex items-center gap-2 group transition-all duration-200 px-4 py-2.5 rounded shadow-lg pointer-events-auto cursor-pointer"
-        style={{
-          background: 'rgba(37,99,235,0.15)',
-          border: '1px solid var(--accent)',
-          backdropFilter: 'blur(8px)',
-        }}
+        className="tactical-btn absolute top-6 left-6 z-50 flex items-center gap-2 group px-4 py-2.5 rounded-sm shadow-lg pointer-events-auto cursor-pointer"
+        style={{ background: 'rgba(0,240,255,0.08)', border: '1px solid var(--accent)', backdropFilter: 'blur(8px)' }}
       >
         <SpecterLogo size="sm" />
-        <span
-          className="font-mono text-[10px] tracking-widest uppercase font-bold text-white group-hover:text-accent-hi transition-colors"
-        >
-          ← NEW SCAN
+        <span className="font-mono text-[10px] tracking-widest uppercase font-bold text-white group-hover:text-accent-hi transition-colors">
+          + NEW SCAN
         </span>
       </button>
 
       <AnimatePresence>
-        {(isPolling || isLoading) && !isReady && (
-          <ScanLoader />
-        )}
+        {(isPolling || isLoading) && !isReady && <ScanLoader />}
       </AnimatePresence>
 
       <AnimatePresence>
         {error && (
           <motion.div
             className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
           >
-            <div className="text-center p-6 rounded-lg border backdrop-blur-md pointer-events-auto" style={{ background: 'var(--surface)', borderColor: 'var(--border-hi)' }}>
+            <div className="glass-panel text-center p-6 rounded-sm pointer-events-auto">
               <p className="font-mono text-[11px] mb-4" style={{ color: 'var(--critical)' }}>{error}</p>
-              <button 
-                onClick={handleBack} 
-                className="pointer-events-auto cursor-pointer font-mono text-[10px] tracking-widest uppercase px-4 py-2 rounded-sm transition-colors"
-                style={{ background: 'var(--surface-2)', color: 'var(--ink)', border: '1px solid var(--border-hi)' }}
+              <button
+                onClick={handleBack}
+                className="tactical-btn pointer-events-auto cursor-pointer font-mono text-[10px] tracking-widest uppercase px-4 py-2 rounded-sm"
+                style={{ color: 'var(--ink)' }}
               >
                 TRY ANOTHER REPO →
               </button>
@@ -165,27 +216,27 @@ export default function ScanPage() {
       <AnimatePresence>
         {isReady && (
           <>
-            {/* Desktop Panel */}
             <motion.aside
               className="hidden md:flex absolute top-0 right-0 h-full w-[380px] lg:w-[400px] flex-col z-30 overflow-hidden pointer-events-auto"
-              style={{
-                background: 'rgba(4,8,15,0.96)',
-                borderLeft: '1px solid var(--border-hi)',
-                backdropFilter: 'blur(8px)',
-              }}
+              style={{ background: 'rgba(3,7,18,0.96)', borderLeft: '1px solid var(--border-hi)', backdropFilter: 'blur(8px)' }}
               initial={{ x: 420, opacity: 0 }}
               animate={{ x: 0, opacity: 1 }}
               exit={{ x: 420, opacity: 0 }}
               transition={{ type: 'spring', damping: 30, stiffness: 250 }}
             >
-              <SidebarContent />
+              <ScanSidebar
+                scanResult={scanResult!}
+                scannerFilter={scannerFilter}
+                onFilterChange={setScannerFilter}
+                onExportPdf={handleExportPdf}
+                pdfLoading={pdfLoading}
+              />
             </motion.aside>
 
-            {/* Mobile Sheet — Now fully draggable and toggleable */}
             <motion.aside
               className="flex md:hidden absolute bottom-0 left-0 right-0 flex-col z-40 overflow-hidden pointer-events-auto"
               style={{
-                background: 'rgba(4,8,15,0.97)',
+                background: 'rgba(3,7,18,0.97)',
                 borderTop: '1px solid var(--border-hi)',
                 borderRadius: '20px 20px 0 0',
                 backdropFilter: 'blur(12px)',
@@ -196,25 +247,27 @@ export default function ScanPage() {
               exit={{ y: '100%' }}
               transition={{ type: 'spring', damping: 25, stiffness: 200 }}
             >
-              {/* Interactive Pull Handle */}
-              <motion.div 
+              <motion.div
                 className="flex justify-center pt-4 pb-3 shrink-0 w-full relative z-20 cursor-grab active:cursor-grabbing touch-none"
                 drag="y"
                 dragConstraints={{ top: 0, bottom: 0 }}
                 dragElastic={0.2}
                 onDragEnd={(e, info) => {
-                  if (info.offset.y < -20) setIsMobileExpanded(true);  // Dragged up
-                  if (info.offset.y > 20) setIsMobileExpanded(false); // Dragged down
+                  if (info.offset.y < -20) setIsMobileExpanded(true);
+                  if (info.offset.y > 20) setIsMobileExpanded(false);
                 }}
                 onClick={() => setIsMobileExpanded(!isMobileExpanded)}
               >
-                <div 
-                  className="w-12 h-1.5 rounded-full transition-colors" 
-                  style={{ background: isMobileExpanded ? 'var(--accent)' : 'var(--border-hi)' }} 
-                />
+                <div className="w-12 h-1.5 rounded-full transition-colors" style={{ background: isMobileExpanded ? 'var(--accent)' : 'var(--border-hi)' }} />
               </motion.div>
-              
-              <SidebarContent />
+
+              <ScanSidebar
+                scanResult={scanResult!}
+                scannerFilter={scannerFilter}
+                onFilterChange={setScannerFilter}
+                onExportPdf={handleExportPdf}
+                pdfLoading={pdfLoading}
+              />
             </motion.aside>
           </>
         )}
