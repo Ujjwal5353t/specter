@@ -66,8 +66,8 @@ npm install
 ```env
 GITHUB_TOKEN=your_github_token
 NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
-SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=your_supabase_publishable_key
+SUPABASE_SECRET_KEY=your_supabase_secret_key
 OPENROUTER_API_KEY=your_key
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 

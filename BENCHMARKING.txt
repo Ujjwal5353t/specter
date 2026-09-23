@@ -1,0 +1,103 @@
+SPECTER — ACCURACY & BENCHMARKING NOTES (for pitch / judge Q&A)
+==================================================================
+
+THE QUESTION TO EXPECT: "How accurate is this? How do you know?"
+
+Short answer to lead with:
+  "CVE detection is ground-truth accurate against OSV.dev. Secret detection
+   is heuristic and benchmarked for precision/recall against a labeled test
+   set, the same approach tools like gitleaks and trufflehog use. The
+   composite 0-100 threat score is a relative risk indicator, not a
+   calibrated prediction, and we don't claim it's 'accurate' in a
+   statistical sense — what's verifiable is the findings that feed it."
+
+------------------------------------------------------------------
+1. THE THREAT SCORE ITSELF IS NOT BENCHMARKABLE — SAY THIS UP FRONT
+------------------------------------------------------------------
+The 0-100 score is a hand-weighted sum of findings across all five
+scanners. There is no ground-truth "correct" threat score for a given
+repo to validate it against — no external dataset says "lodash should
+score exactly 42." Don't try to defend the number itself. Defend the
+individual findings that produce it, and be upfront that the score is
+a relative risk indicator (useful for comparing two scans of the same
+repo, or roughly ranking repos), not a calibrated probability.
+
+------------------------------------------------------------------
+2. SPLIT THE FIVE SCANNERS INTO TWO ACCURACY CLASSES
+------------------------------------------------------------------
+
+A) GROUND-TRUTH VERIFIABLE (quote a hard number here)
+
+   DepChain (CVE matching):
+     OSV.dev IS the ground truth. Build a small fixture set of repos /
+     package.json snippets pinned to package versions with KNOWN,
+     published CVEs (e.g. minimist <1.2.6 prototype pollution,
+     lodash <4.17.21, event-stream 3.3.6 itself). Run DepChain against
+     them and confirm:
+       - 100% detection on the vulnerable pinned versions
+       - 0% false positives on the patched versions
+     This is not "does DepChain detect novel threats" (it structurally
+     can't — see section 3). It IS a fully legitimate, fully verifiable
+     claim: "our registry-resolution + OSV query pipeline correctly
+     reports what OSV already knows, with zero false positives on our
+     test set."
+
+   LayerScan (Dockerfile rules):
+     Rule-based against known-bad / known-good Dockerfile patterns
+     (:latest tag, curl|sh, secrets in RUN/ENV, missing USER, etc.).
+     Same approach: build ~10-15 fixture Dockerfiles, confirm each rule
+     fires/doesn't fire as expected.
+
+B) HEURISTIC — NO GROUND TRUTH EXISTS, MEASURE PRECISION/RECALL
+   AGAINST A LABELED SET YOU BUILD
+
+   GhostCommit / EnvTrace (secret + entropy detection):
+     This is exactly the problem gitleaks and trufflehog solve, and
+     both publish benchmark corpora for it. Build a small labeled set:
+       - N commits with deliberately planted fake secrets (true
+         positives)
+       - M clean commits with no secrets (false-positive check)
+     Run GhostCommit, report:
+       - Recall  = true positives caught / total planted secrets
+       - False-positive rate = false hits / clean lines scanned
+     This also validates (or invalidates) the entropy threshold (4.5)
+     empirically instead of asserting it's correct.
+
+   APIBleed (auth heuristic):
+     Weakest of the five — "has auth" is a keyword-proximity guess,
+     not a real auth-flow analysis. Recommend explicitly framing this
+     one as best-effort in the pitch rather than quoting an accuracy
+     number for it, since a fair labeled benchmark is much harder to
+     construct honestly here.
+
+------------------------------------------------------------------
+3. THE HARD LIMIT TO BE HONEST ABOUT: KNOWN-CVE VS NOVEL COMPROMISE
+------------------------------------------------------------------
+DepChain only flags what OSV.dev has already catalogued. The two demo
+repos (event-stream 2018, node-ipc 2022) are real supply-chain attacks
+where malicious code was published as a version bump to an already-
+trusted package — not visible in the consuming repo's own commit
+history, and not in OSV until days/weeks after public disclosure.
+
+If asked "would this have caught event-stream on day zero" — the
+honest answer with the current implementation is NO. It catches it
+NOW, retroactively, because OSV has since backfilled the entry. Don't
+oversell this. Frame it as: "we correctly catch every disclosed CVE in
+your dependency tree, in real time, which most teams don't do at all
+today — closing the zero-day gap is the next layer (heuristic
+install-script / typosquat detection, roadmapped)."
+
+------------------------------------------------------------------
+4. TALKING POINT TO ACTUALLY SAY OUT LOUD
+------------------------------------------------------------------
+"We validated DepChain against N repos with known, disclosed CVEs —
+100% detection, 0 false positives on patched versions, cross-checked
+against OSV.dev directly. We validated GhostCommit's secret detection
+against a planted-secret test set at [X]% recall and [Y]% false-
+positive rate, using the same benchmarking approach industry tools
+like gitleaks use. The composite score is a relative risk indicator
+built from those verified findings, not a black-box prediction."
+
+Fill in the bracketed numbers once the fixture set + script exist
+(tracked as its own GitHub issue: "No validation corpus / published
+accuracy numbers for DepChain / GhostCommit").
