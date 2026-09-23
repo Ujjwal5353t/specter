@@ -8,20 +8,20 @@
 @import "tailwindcss";
 
 @theme {
-  --color-void:       #04080f;
+  --color-void:       #030712;
   --color-surface:    #080d18;
   --color-s2:         #0d1525;
   --color-border:     #132035;
   --color-border-hi:  #1e3355;
   --color-muted:      #2a3d5c;
-  --color-ink:        #7a93b8;
+  --color-ink:        #8fa8cc;
   --color-specter:    #d4e4f7;
-  --color-critical:   #ef4444;
-  --color-high:       #f97316;
+  --color-critical:   #FF2A6D;
+  --color-high:       #F59E0B;
   --color-medium:     #eab308;
   --color-safe:       #22c55e;
-  --color-accent:     #2563eb;
-  --color-accent-hi:  #3b82f6;
+  --color-accent:     #00F0FF;
+  --color-accent-hi:  #4dfaff;
 
   --font-display: 'Space Grotesk', sans-serif;
   --font-mono:    'JetBrains Mono', monospace;
@@ -42,28 +42,30 @@
 }
 
 :root {
-  --void:         #04080f;
+  --void:         #030712;
   --surface:      #080d18;
   --surface-2:    #0d1525;
   --border:       #132035;
   --border-hi:    #1e3355;
-  --muted:        #2a3d5c;
-  --ink:          #7a93b8;
-  --white:        #d4e4f7;
-  --critical:     #ef4444;
-  --critical-dim: #2d0a0a;
-  --critical-glow:#ff000033;
-  --high:         #f97316;
-  --high-dim:     #2d1200;
+  --muted:        #3a4d6c;
+  --ink:          #8fa8cc;
+  --white:        #eaf4ff;
+  --critical:     #FF2A6D;
+  --critical-dim: #2d0a16;
+  --critical-glow:#ff2a6d33;
+  --high:         #F59E0B;
+  --high-dim:     #2d1c00;
   --medium:       #eab308;
   --medium-dim:   #1f1800;
   --safe:         #22c55e;
   --safe-dim:     #062010;
-  --accent:       #2563eb;
-  --accent-hi:    #3b82f6;
-  --accent-glow:  #2563eb22;
-  --scan-line:    rgba(37, 99, 235, 0.04);
-  --grid-line:    rgba(37, 99, 235, 0.06);
+  --accent:       #00F0FF;
+  --accent-hi:    #4dfaff;
+  --accent-glow:  #00f0ff33;
+  --scan-line:    rgba(0, 240, 255, 0.04);
+  --grid-line:    rgba(0, 240, 255, 0.06);
+  --glass-bg:     rgba(255, 255, 255, 0.03);
+  --glass-border: rgba(255, 255, 255, 0.10);
   font-family: 'Inter', sans-serif;
 }
 
@@ -161,6 +163,66 @@ html, body, #__next {
 .font-display { font-family: 'Space Grotesk', sans-serif; }
 .font-mono    { font-family: 'JetBrains Mono', monospace; }
 .font-body    { font-family: 'Inter', sans-serif; }
+
+/* ── Glassmorphism panel (Palantir/Linear-style frosted surface) ── */
+.glass-panel {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+/* ── Tactical button: glowing border on hover, used for primary actions ── */
+.tactical-btn {
+  position: relative;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(12px);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease;
+}
+.tactical-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 0 20px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.tactical-btn:active:not(:disabled) { transform: translateY(0.5px); }
+
+/* ── Focus glow for the command input ── */
+.command-input:focus {
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent) !important;
+  box-shadow: 0 0 25px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+/* ── Gimbal reticle spin (bottom-left tactical compass) ── */
+@keyframes gimbal-spin {
+  0%   { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+@keyframes gimbal-spin-reverse {
+  0%   { transform: rotate(360deg); }
+  100% { transform: rotate(0deg); }
+}
+.gimbal-ring-outer { animation: gimbal-spin 18s linear infinite; }
+.gimbal-ring-inner { animation: gimbal-spin-reverse 11s linear infinite; }
+
+/* ── Perimeter sweep (used on the holographic infra platform badge) ── */
+@keyframes perimeter-sweep {
+  0%   { transform: translateX(-100%); opacity: 0; }
+  15%  { opacity: 0.9; }
+  85%  { opacity: 0.9; }
+  100% { transform: translateX(100%); opacity: 0; }
+}
+.perimeter-sweep {
+  position: relative;
+  overflow: hidden;
+}
+.perimeter-sweep::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 35%, transparent), transparent);
+  animation: perimeter-sweep 3s ease-in-out infinite;
+  pointer-events: none;
+}
 
 /* ── Reduced motion ── */
 @media (prefers-reduced-motion: reduce) {

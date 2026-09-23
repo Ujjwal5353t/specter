@@ -1,5 +1,5 @@
 import { getFileContent, getRepoTree } from '@/lib/github';
-import type { EnvFinding, Severity } from '@/types';
+import type { EnvFinding } from '@/types';
 
 const CRED_PATTERNS = [
   { name: 'Database URL',    re: /(?:DATABASE_URL|DB_URL|MONGO_URI|REDIS_URL|POSTGRES_URL)\s*=\s*["']?[a-z]+:\/\/[^\s"']+/gi },

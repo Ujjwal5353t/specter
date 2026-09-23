@@ -1,5 +1,5 @@
 import { getFileContent } from '@/lib/github';
-import type { DockerFinding, Severity } from '@/types';
+import type { DockerFinding } from '@/types';
 
 interface Instruction { instr: string; args: string; line: number; }
 

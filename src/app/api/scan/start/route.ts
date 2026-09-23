@@ -18,8 +18,9 @@ export async function POST(req: NextRequest) {
   let owner: string, repo: string;
   try {
     ({ owner, repo } = parseRepoUrl(repoUrl));
-  } catch (e: any) {
-    return NextResponse.json({ error: e.message }, { status: 400 });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : 'Invalid GitHub URL';
+    return NextResponse.json({ error: message }, { status: 400 });
   }
 
   // Normalize the URL to lowercase to prevent case-sensitive cache misses
@@ -64,7 +65,7 @@ export async function POST(req: NextRequest) {
   // This guarantees the request actually leaves before this function
   // terminates. We don't wait for the full scan, just for /run to
   // accept the trigger (it runs the real work independently afterward).
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'https://specter-seven.vercel.app';
+  const appUrl = req.nextUrl?.origin || process.env.NEXT_PUBLIC_APP_URL || 'https://specter-seven.vercel.app';
   try {
     await fetch(`${appUrl}/api/scan/${scan.id}/run`, {
       method: 'POST',

@@ -3,6 +3,7 @@ import { useRef, useMemo } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import type { DepNode } from '@/types';
+import { computeNodePositions } from '@/lib/depGraphLayout';
 
 interface Props { nodes: DepNode[]; }
 
@@ -15,25 +16,10 @@ export default function AttackPaths({ nodes }: Props) {
     [nodes]
   );
 
-  const nodePositions = useMemo(() => {
-    const map = new Map<string, THREE.Vector3>();
-    const directNodes = nodes.filter((n) => n.isDirect && !n.isRoot);
-    const transitiveNodes = nodes.filter((n) => !n.isDirect && !n.isRoot);
-    nodes.forEach((node) => {
-      if (node.isRoot) { map.set(node.id, new THREE.Vector3(0, 0, 0)); return; }
-    });
-    directNodes.forEach((node, i) => {
-      const angle = (i / Math.max(directNodes.length, 1)) * Math.PI * 2;
-      const r = 65;
-      map.set(node.id, new THREE.Vector3(Math.cos(angle) * r, 0, Math.sin(angle) * r));
-    });
-    transitiveNodes.forEach((node, i) => {
-      const angle = (i / Math.max(transitiveNodes.length, 1)) * Math.PI * 2 + 0.3;
-      const r = 120;
-      map.set(node.id, new THREE.Vector3(Math.cos(angle) * r, 0, Math.sin(angle) * r));
-    });
-    return map;
-  }, [nodes]);
+  // Same positions DepGraph renders its spheres at — this is what makes the
+  // particle streams actually converge on the vulnerable node instead of
+  // flowing along a flat plane that misses it.
+  const positions = useMemo(() => computeNodePositions(nodes), [nodes]);
 
   const PARTICLES_PER_NODE = 25;
 
@@ -53,13 +39,14 @@ export default function AttackPaths({ nodes }: Props) {
     const root = new THREE.Vector3(0, 0, 0);
 
     vulnNodes.forEach((node, ni) => {
-      const nodePos = nodePositions.get(node.id);
-      if (!nodePos) return;
+      const p3 = positions.get(node.id);
+      if (!p3) return;
+      const nodePos = new THREE.Vector3(p3[0], p3[1], p3[2]);
       for (let p = 0; p < PARTICLES_PER_NODE; p++) {
         const t = ((timeRef.current * 0.6 + ni * 0.4 + p * (1 / PARTICLES_PER_NODE)) % 1);
         const idx = (ni * PARTICLES_PER_NODE + p) * 3;
         arr[idx]     = nodePos.x + (root.x - nodePos.x) * t;
-        arr[idx + 1] = nodePos.y + (root.y - nodePos.y) * t + Math.sin(t * Math.PI) * 8;
+        arr[idx + 1] = nodePos.y + (root.y - nodePos.y) * t + Math.sin(t * Math.PI) * 6;
         arr[idx + 2] = nodePos.z + (root.z - nodePos.z) * t;
       }
     });
@@ -71,10 +58,10 @@ export default function AttackPaths({ nodes }: Props) {
   return (
     <points ref={pointsRef} geometry={geometry}>
       <pointsMaterial
-        color="#ef4444"
+        color="#FF2A6D"
         size={2}
         transparent
-        opacity={0.85}
+        opacity={0.9}
         sizeAttenuation
       />
     </points>

@@ -67,7 +67,7 @@ export const useScanStore = create<ScanStore>((set, get) => ({
           get().stopPolling();
           set({ error: 'Scan failed. The repo may be private or the URL is incorrect.', isLoading: false });
         }
-      } catch (e) {
+      } catch {
         // keep polling on transient errors
       }
     }, 3000);
