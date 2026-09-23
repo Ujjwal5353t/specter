@@ -40,7 +40,9 @@ export const useScanStore = create<ScanStore>((set, get) => ({
   },
 
   startPolling: (scanId: string) => {
-    set({ isPolling: true });
+    // Drop any previous scan's result/error so they can't bleed into this one
+    get().stopPolling();
+    set({ isPolling: true, scanResult: null, error: null });
     pollInterval = setInterval(async () => {
       try {
         const res = await fetch(`/api/scan/${scanId}/status`);
@@ -65,7 +67,7 @@ export const useScanStore = create<ScanStore>((set, get) => ({
           });
         } else if (data.scan?.status === 'failed') {
           get().stopPolling();
-          set({ error: 'Scan failed. The repo may be private or the URL is incorrect.', isLoading: false });
+          set({ error: data.scan.error_message ?? 'Scan failed. The repo may be private or the URL is incorrect.', isLoading: false });
         }
       } catch {
         // keep polling on transient errors

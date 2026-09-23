@@ -29,17 +29,12 @@ export async function runLayerScan(owner: string, repo: string) {
   // Check all candidate paths in parallel instead of sequentially.
   // Sequential awaits meant repos with no Dockerfile (e.g. Rust projects)
   // paid the full latency of 5 separate 404s back-to-back.
-  const results = await Promise.allSettled(
+  // Missing files resolve to null; real GitHub errors reject and fail the scanner.
+  const results = await Promise.all(
     candidates.map((c) => getFileContent(owner, repo, c))
   );
 
-  let content: string | null = null;
-  for (const r of results) {
-    if (r.status === 'fulfilled' && r.value) {
-      content = r.value;
-      break;
-    }
-  }
+  const content = results.find((r) => r) ?? null;
 
   let baseImage = 'No Dockerfile found';
 

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
-import { clearFileCache } from '@/lib/github';
+import { checkRepoAccess, clearFileCache } from '@/lib/github';
 import { runDepChain } from '@/lib/scanners/depchain';
 import { runGhostCommit } from '@/lib/scanners/ghostcommit';
 import { runLayerScan } from '@/lib/scanners/layerscan';
@@ -68,14 +68,43 @@ export async function POST(
 
   clearFileCache();
 
+  const failScan = async (reason: string, status: number) => {
+    await supabaseAdmin
+      .from('scans')
+      .update({ status: 'failed', error_message: reason })
+      .eq('id', scanId);
+    return NextResponse.json({ error: reason }, { status });
+  };
+
+  const access = await checkRepoAccess(owner, repo);
+  if (!access.ok) return failScan(access.reason, 422);
+
   try {
-    const [dep, ghost, layer, api, env] = await Promise.allSettled([
+    const settled = await Promise.allSettled([
       runDepChain(owner, repo),
       runGhostCommit(owner, repo),
       runLayerScan(owner, repo),
       runAPIBleed(owner, repo),
       runEnvTrace(owner, repo),
     ]);
+    const [dep, ghost, layer, api, env] = settled;
+
+    // A scanner that errored produced no findings, which would score the repo
+    // as safer than it is. Fail the whole scan instead of saving a partial one.
+    const scannerNames = ['DepChain', 'GhostCommit', 'LayerScan', 'APIBleed', 'EnvTrace'];
+    const failed = scannerNames.filter((_, i) => settled[i].status === 'rejected');
+    if (failed.length > 0) {
+      settled.forEach((s, i) => {
+        if (s.status === 'rejected') console.error(`${scannerNames[i]} failed:`, s.reason);
+      });
+      // Most likely cause: the repo went private or was deleted mid-scan
+      const recheck = await checkRepoAccess(owner, repo);
+      if (!recheck.ok) return failScan(recheck.reason, 422);
+      return failScan(
+        `${failed.join(', ')} could not finish, so results would be incomplete. Please try again.`,
+        502
+      );
+    }
 
     const results: ScanResults = {
       depchain:    dep.status    === 'fulfilled' ? dep.value    : null,
@@ -121,11 +150,8 @@ export async function POST(
       await supabaseAdmin.from('findings').insert(allFindings);
     }
 
-    await supabaseAdmin
-      .from('scans')
-      .update({ status: 'completed', threat_score: threatScore, completed_at: new Date().toISOString() })
-      .eq('id', scanId);
-
+    // Write the cache before flipping to completed, so a status poll never
+    // sees a completed scan without its result data
     await supabaseAdmin.from('scan_cache').upsert({
       repo_url: repoUrl,
       dep_data: results.depchain,
@@ -137,14 +163,15 @@ export async function POST(
       expires_at: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
     });
 
+    await supabaseAdmin
+      .from('scans')
+      .update({ status: 'completed', threat_score: threatScore, completed_at: new Date().toISOString() })
+      .eq('id', scanId);
+
     return NextResponse.json({ ok: true, threatScore });
 
   } catch (err) {
     console.error('Run route error:', err);
-    await supabaseAdmin
-      .from('scans')
-      .update({ status: 'failed' })
-      .eq('id', scanId);
-    return NextResponse.json({ error: 'Scan failed' }, { status: 500 });
+    return failScan('Scan failed due to an internal error. Please try again.', 500);
   }
 }

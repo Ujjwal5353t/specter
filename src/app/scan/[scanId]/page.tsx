@@ -126,7 +126,7 @@ export default function ScanPage() {
         } else if (data.scan?.status === 'scanning' || data.scan?.status === 'pending') {
           startPolling(scanId);
         } else if (data.scan?.status === 'failed') {
-          setError('Scan failed. The repo may be private or the URL is incorrect.');
+          setError(data.scan.error_message ?? 'Scan failed. The repo may be private or the URL is incorrect.');
         }
       } catch {
         /* leave state as-is on a transient error */
