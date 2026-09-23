@@ -14,12 +14,13 @@ Earlier in this project's history, the items below were built, tested against th
 commit removed all of it because it had never been committed. They are genuinely **not in the
 code right now**. Re-confirmed via `grep` on 2026-09-23:
 
-- [ ] **The server-hang bug is back.** `ghostcommit.ts` has no per-file size cap, no event-loop
-  yield, and the Database URL regex is unbounded again (`[^\s"'<>]+` instead of `{1,100}`). This
-  is the exact bug that pegged a CPU core at ~190% for 8+ minutes and made the whole server stop
-  responding to every request when scanning an ordinary repo like `lodash/lodash`. It is the
-  single highest-priority item in this document — everything else is secondary to an
-  availability bug that any visitor can trigger by pasting a normal GitHub URL.
+- [x] ~~**The server-hang bug is back.**~~ **Resolved (2026-09-23, GitHub Issue #2 reopened by
+  `pratham27-pro` — regression, not a new bug):** `ghostcommit.ts` now uses a bounded Database URL
+  regex (`{1,100}` instead of unbounded `+`), skips any commit-diff line over 1,500 characters,
+  caps per-file patches at 60KB and 1,000 lines, and yields to the Node event loop via
+  `setTimeout(resolve, 0)` every 80 lines. Four independent layers, not just the regex fix alone,
+  since the earlier version of this fix regressed once already — see the top note above this list
+  for why nothing here should be assumed permanent until it's committed.
 - [ ] **Supabase client crashes on missing config again.** `src/lib/supabase.ts` still has the
   `SUPABASE_SECRET_KEY`/`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` fallback (that part survived), but
   the lazy-instantiation Proxy is gone — `createClient()` runs at module import time again, so a
@@ -79,8 +80,9 @@ or don't match what's actually implemented. Cross-checked against every source f
 
 ## 🔴 Critical
 
-- [ ] **Server hang on real scans** (see the top section — this is the #1 priority, full details
-  there).
+- [x] ~~**Server hang on real scans**~~ — Fixed: bounded regex quantifiers, per-file patch caps
+  (60KB / 1,000 lines), a 1,500-char line-length guard, and periodic event-loop yields in
+  `ghostcommit.ts` (see the top section for full detail).
 - [ ] **Supabase crashes the app on missing/misconfigured env vars** instead of degrading
   gracefully (see top section).
 - [ ] **`npm audit fix`** — 11 vulnerabilities, 1 critical, in the pinned `next@16.2.9`.

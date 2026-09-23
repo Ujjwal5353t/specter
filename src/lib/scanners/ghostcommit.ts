@@ -20,7 +20,12 @@ const PATTERNS: { name: string; regex: RegExp }[] = [
   { name: 'JWT Token',          regex: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g },
   { name: 'Private Key Block',  regex: /-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/g },
   { name: 'Slack Token',        regex: /xox[baprs]-[A-Za-z0-9-]{10,}/g },
-  { name: 'Database URL',       regex: /(?:mysql|postgres|mongodb|redis):\/\/[^\s"'<>]+:[^\s"'<>]+@[^\s"'<>]+/gi },
+  // Bounded quantifiers ({1,100}) instead of unbounded (+) — two adjacent
+  // unbounded negated-character-classes separated by literals is the classic
+  // shape for catastrophic regex backtracking on pathological/huge input
+  // (e.g. a long minified line in a commit's diff). Real connection-string
+  // user/host segments are never anywhere near 100 chars.
+  { name: 'Database URL',       regex: /(?:mysql|postgres|mongodb|redis):\/\/[^\s"'<>]{1,100}:[^\s"'<>]{1,100}@[^\s"'<>]{1,100}/gi },
   { name: 'Generic API Key',    regex: /(?:api_key|apikey|auth_token|secret_key)\s*[=:]\s*["']?[A-Za-z0-9_\-]{20,}["']?/gi },
 ];
 
@@ -55,6 +60,10 @@ function scanLine(
 ): SecretFinding[] {
   const findings: SecretFinding[] = [];
   if (line.startsWith('-')) return findings;
+  // A pathologically long line (minified/bundled/generated content) is a
+  // second, independent line of defense against catastrophic regex work,
+  // on top of the bounded patterns below.
+  if (line.length > 1500) return findings;
   const content = line.replace(/^\+/, '');
 
   for (const { name, regex } of PATTERNS) {
@@ -108,12 +117,21 @@ export async function runGhostCommit(owner: string, repo: string) {
     try {
       const detail = await octokit.repos.getCommit({ owner, repo, ref: commit.sha });
       for (const file of detail.data.files ?? []) {
-        if (!file.patch) continue;
+        // Skip files with massive patches — real secrets are never buried
+        // 60KB deep in a single patch, and this bounds the worst-case
+        // synchronous regex/entropy work done per file (this is what let a
+        // single scan peg the Node event loop for minutes and stall every
+        // other in-flight request).
+        if (!file.patch || file.patch.length > 60000) continue;
         if (shouldSkipFile(file.filename)) continue;
         if (file.filename.includes('node_modules') || file.filename.includes('.min.')) continue;
 
-        const lines = file.patch.split('\n');
+        // Belt-and-suspenders alongside the byte cap above: even a <60KB
+        // patch could still be thousands of short lines, so also cap how
+        // many lines of any one file get scanned.
+        const lines = file.patch.split('\n').slice(0, 1000);
         let lineNum = 0;
+        let processedLines = 0;
         for (const line of lines) {
           if (line.startsWith('@@')) {
             const m = line.match(/@@ \+(\d+)/);
@@ -131,6 +149,13 @@ export async function runGhostCommit(owner: string, repo: string) {
             );
           }
           if (!line.startsWith('-')) lineNum++;
+
+          // Yield to the event loop periodically so a file with many lines
+          // can't monopolize the server for the whole scan — other pending
+          // requests (status polls, unrelated API calls) get a turn.
+          if (++processedLines % 80 === 0) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
         }
       }
       await new Promise((r) => setTimeout(r, 120)); // rate limit guard
