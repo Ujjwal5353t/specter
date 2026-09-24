@@ -16,7 +16,7 @@ export interface NpmVersionDoc {
   version: string;
   dependencies?: Record<string, string>;
   scripts?: Record<string, string>;
-  _npmUser?: { name?: string };
+  _npmUser?: { name?: string; email?: string };
   dist?: { attestations?: unknown };
 }
 
@@ -50,6 +50,13 @@ function parseTime(pk: Packument, key: string): number | null {
   return Number.isNaN(ms) ? null : ms;
 }
 
+// npm records trusted publishing (OIDC from CI) as a "GitHub Actions" user, so moving
+// to it changes the publisher name without any change in who controls the package.
+function isTrustedPublisher(user: NpmVersionDoc['_npmUser']): boolean {
+  if (!user) return false;
+  return /github actions$/i.test(user.name?.trim() ?? '') || /npm-oidc-no-reply/i.test(user.email ?? '');
+}
+
 function installHooks(doc: NpmVersionDoc | undefined): string[] {
   return INSTALL_HOOKS.filter((h) => doc?.scripts?.[h]?.trim());
 }
@@ -79,7 +86,7 @@ export function analyzeVersion(pk: Packument, version: string, now: number): Ver
 
   // 1. First release by someone who never published this package before
   const publisher = doc._npmUser?.name;
-  if (publisher && publishedAt !== null) {
+  if (publisher && publishedAt !== null && !isTrustedPublisher(doc._npmUser)) {
     const earlier = Object.values(pk.versions ?? {}).filter((d) => {
       const t = parseTime(pk, d.version);
       return t !== null && t < publishedAt;
@@ -179,19 +186,40 @@ export function analyzeVersion(pk: Packument, version: string, now: number): Ver
   return { signals, publishedAt, newDeps };
 }
 
+const scopeOf = (name: string) => (name.startsWith('@') ? name.split('/')[0] : null);
+
+/** Publisher of the earliest release of a package, from data already in its packument. */
+function firstPublisher(pk: Packument): string | undefined {
+  let earliest: { t: number; user?: string } | null = null;
+  for (const doc of Object.values(pk.versions ?? {})) {
+    const t = parseTime(pk, doc.version);
+    if (t !== null && (!earliest || t < earliest.t)) earliest = { t, user: doc._npmUser?.name };
+  }
+  return earliest?.user;
+}
+
 /**
  * Flags a dependency that was added to its parent in the parent's current
  * release while the dependency itself was only days old (flatmap-stream, peacenotwar).
+ * Monorepo siblings (same @scope, or first published by the parent release's
+ * publisher) ship together, so a fresh sibling is routine and not flagged.
  */
 export function youngDependencySignal(
   dep: Packument,
   parentLabel: string,
-  parentPublishedAt: number
+  parentPublishedAt: number,
+  parent?: { name: string; publisher?: string }
 ): RiskSignal | null {
   const createdAt = parseTime(dep, 'created');
   if (createdAt === null) return null;
   const age = parentPublishedAt - createdAt;
   if (age >= YOUNG_PACKAGE_DAYS * DAY_MS) return null;
+  if (parent) {
+    const scope = scopeOf(dep.name);
+    if (scope && scope === scopeOf(parent.name)) return null;
+    const depPublisher = firstPublisher(dep);
+    if (depPublisher && depPublisher === parent.publisher) return null;
+  }
   return {
     type: 'young_dependency',
     severity: 'high',
@@ -221,13 +249,33 @@ function editDistance(a: string, b: string): number {
 const POPULAR_SET = new Set(POPULAR_PACKAGES);
 const stripSeparators = (s: string) => s.toLowerCase().replace(/[-_./]/g, '');
 
+// Below this length one edit reaches too many unrelated real names (ws/wa, ora/orb)
+const MIN_EDIT_DISTANCE_LENGTH = 5;
+
+export interface TyposquatMatch {
+  target: string;
+  /** Names equal once separators are stripped (lodash / lo-dash): strong enough without download data. */
+  exact: boolean;
+}
+
 /** The popular package `name` looks like a misspelling of, if any. */
-export function typosquatTarget(name: string): string | null {
+export function typosquatMatch(name: string): TyposquatMatch | null {
   if (POPULAR_SET.has(name) || name.length < 4) return null;
   const bare = stripSeparators(name);
+  const scoped = name.startsWith('@');
+  let fuzzy: string | null = null;
   for (const popular of POPULAR_PACKAGES) {
-    if (stripSeparators(popular) === bare) return popular;
-    if (Math.abs(popular.length - name.length) <= 1 && editDistance(name, popular) === 1) return popular;
+    // Scoped and unscoped names are different namespaces (@types/react is not a typo of react)
+    if (popular.startsWith('@') !== scoped) continue;
+    if (stripSeparators(popular) === bare) return { target: popular, exact: true };
+    if (
+      !fuzzy && name.length >= MIN_EDIT_DISTANCE_LENGTH &&
+      Math.abs(popular.length - name.length) <= 1 && editDistance(name, popular) === 1
+    ) fuzzy = popular;
   }
-  return null;
+  return fuzzy ? { target: fuzzy, exact: false } : null;
+}
+
+export function typosquatTarget(name: string): string | null {
+  return typosquatMatch(name)?.target ?? null;
 }

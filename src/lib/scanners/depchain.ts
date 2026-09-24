@@ -1,7 +1,7 @@
 import semver from 'semver';
 import type { DepNode, DepEdge, CVE, Severity, RiskSignal } from '@/types';
 import { getFileContent, getRepoTree } from '@/lib/github';
-import { analyzeVersion, youngDependencySignal, typosquatTarget, type Packument } from './deprisk';
+import { analyzeVersion, youngDependencySignal, typosquatMatch, type Packument } from './deprisk';
 
 const REGISTRY_BASE = 'https://registry.npmjs.org';
 const DOWNLOADS_API = 'https://api.npmjs.org/downloads/point/last-week';
@@ -14,6 +14,8 @@ const TYPOSQUAT_MAX_WEEKLY_DOWNLOADS = 10_000;
 interface ScanContext {
   now: number;
   packuments: Map<string, Promise<Packument | null>>;
+  /** Queues registry requests so only MAX_REGISTRY_CONCURRENCY run at once. */
+  limit: ReturnType<typeof createLimiter>;
   nodes: Map<string, DepNode>;
   edges: DepEdge[];
   /** Publish time and newly added dependencies, per node id, for the young-dependency pass. */
@@ -40,8 +42,57 @@ function severityFromScore(score: number): Severity {
   return 'info';
 }
 
-function cleanVersion(v: string): string {
-  return v.replace(/[\^~>=<]/g, '').split(' ')[0].split('||')[0].trim() || 'latest';
+// The tree fans out (25 direct deps x 10 children x depth 3) and every node costs a
+// full packument, which can run to megabytes. Bound it: at most MAX_TREE_NODES
+// packages, MAX_REGISTRY_CONCURRENCY requests in flight, and a wall-clock budget so
+// OSV and advisory lookups still fit inside the 60s function limit. The full
+// packument is needed (time, _npmUser, attestations), so only the fan-out is capped.
+const MAX_TREE_NODES = 300;
+const MAX_REGISTRY_CONCURRENCY = 12;
+const TREE_BUDGET_MS = 20_000;
+
+const PACKAGE_NAME = /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/i;
+// Specs that never come from the registry (or can't be resolved without a lockfile)
+const NON_REGISTRY_SPEC = /^(workspace:|file:|link:|portal:|patch:|git[+:]|github:|gitlab:|bitbucket:|gist:|https?:|ssh:|\.{1,2}\/|~\/|\/|[\w.-]+\/[\w.-]+)/i;
+
+/**
+ * Registry package and range a dependency spec points at, or null for specs
+ * that don't resolve through the npm registry (git urls, local paths, workspaces).
+ * `npm:real-name@range` aliases resolve to the real package.
+ */
+function parseSpec(name: string, spec: string): { name: string; range: string } | null {
+  let range = (spec ?? '').trim() || 'latest';
+  if (range.startsWith('npm:')) {
+    const target = range.slice(4);
+    const at = target.lastIndexOf('@');
+    name = at > 0 ? target.slice(0, at) : target;
+    range = (at > 0 ? target.slice(at + 1) : '').trim() || 'latest';
+  }
+  if (!PACKAGE_NAME.test(name) || NON_REGISTRY_SPEC.test(range)) return null;
+  // A semver range or a dist-tag ("latest", "next"); anything else is not resolvable
+  if (semver.validRange(range) === null && !/^[a-z][\w.-]*$/i.test(range)) return null;
+  return { name, range };
+}
+
+/** Runs registry requests through a small queue so a wide tree can't open hundreds of sockets. */
+function createLimiter(max: number) {
+  let active = 0;
+  const waiting: (() => void)[] = [];
+  return async <T>(task: () => Promise<T>): Promise<T> => {
+    if (active >= max) {
+      // The finishing task hands its slot straight to the next waiter
+      await new Promise<void>((resolve) => waiting.push(resolve));
+    } else {
+      active++;
+    }
+    try {
+      return await task();
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else active--;
+    }
+  };
 }
 
 async function fetchPackument(name: string): Promise<Packument | null> {
@@ -57,14 +108,14 @@ async function fetchPackument(name: string): Promise<Packument | null> {
 function getPackument(ctx: ScanContext, name: string): Promise<Packument | null> {
   let p = ctx.packuments.get(name);
   if (!p) {
-    p = fetchPackument(name);
+    p = ctx.limit(() => fetchPackument(name));
     ctx.packuments.set(name, p);
   }
   return p;
 }
 
-/** The version a fresh `npm install` would pick for this range. */
-function resolveVersion(pk: Packument | null, range: string): string {
+/** The version a fresh `npm install` would pick for this range, or null if it can't be resolved. */
+function resolveVersion(pk: Packument | null, range: string): string | null {
   const versions = pk?.versions;
   if (versions) {
     const tags = pk['dist-tags'] ?? {};
@@ -75,7 +126,9 @@ function resolveVersion(pk: Packument | null, range: string): string {
     const best = semver.maxSatisfying(Object.keys(versions), range);
     if (best) return best;
   }
-  return cleanVersion(range);
+  // Registry unreachable: the lowest version the range allows is the best offline guess
+  const floor = semver.validRange(range) ? semver.minVersion(range)?.version : undefined;
+  return floor && floor !== '0.0.0' ? floor : null;
 }
 
 async function buildTree(
@@ -86,13 +139,23 @@ async function buildTree(
   parentId: string | null
 ): Promise<void> {
   if (depth > 3) return;
+  const spec = parseSpec(name, range);
+  if (!spec) return;
+  ({ name, range } = spec);
+  // Stop fetching once the tree is full or out of time
+  if (ctx.nodes.size > MAX_TREE_NODES || Date.now() - ctx.now > TREE_BUDGET_MS) return;
   const pk = await getPackument(ctx, name);
   const version = resolveVersion(pk, range);
+  if (!version) return;
   const id = `${name}@${version}`;
-  if (ctx.nodes.has(id)) {
+  const existing = ctx.nodes.get(id);
+  if (existing) {
+    // Reaching a package straight from the root makes it direct, whichever path got here first
+    if (depth === 1) existing.isDirect = true;
     if (parentId) ctx.edges.push({ from: parentId, to: id });
     return;
   }
+  if (ctx.nodes.size > MAX_TREE_NODES) return; // root is in the map, hence > rather than >=
 
   const analysis = pk ? analyzeVersion(pk, version, ctx.now) : null;
   ctx.nodes.set(id, {
@@ -124,7 +187,9 @@ async function flagYoungDependencies(ctx: ScanContext): Promise<void> {
     const child = ctx.nodes.get(edge.to);
     if (!release?.publishedAt || !parent || !child || !release.newDeps.includes(child.name)) continue;
     const pk = await getPackument(ctx, child.name);
-    const signal = pk && youngDependencySignal(pk, parent.id, release.publishedAt);
+    const parentPk = await getPackument(ctx, parent.name);
+    const publisher = parentPk?.versions?.[parent.version]?._npmUser?.name;
+    const signal = pk && youngDependencySignal(pk, parent.id, release.publishedAt, { name: parent.name, publisher });
     if (!signal || child.signals?.some((s) => s.type === 'young_dependency')) continue;
     // The stronger, parent-relative signal replaces the generic "brand-new package" one
     child.signals = [...(child.signals ?? []).filter((s) => s.type !== 'young_package'), signal];
@@ -133,7 +198,9 @@ async function flagYoungDependencies(ctx: ScanContext): Promise<void> {
 
 async function weeklyDownloads(name: string): Promise<number | null> {
   try {
-    const res = await fetch(`${DOWNLOADS_API}/${name}`, { signal: AbortSignal.timeout(5000) });
+    // Scoped names keep their slash: @scope/name
+    const path = name.split('/').map(encodeURIComponent).join('/');
+    const res = await fetch(`${DOWNLOADS_API}/${path}`, { signal: AbortSignal.timeout(5000) });
     if (!res.ok) return null;
     const data = await res.json();
     return typeof data.downloads === 'number' ? data.downloads : null;
@@ -145,15 +212,19 @@ async function weeklyDownloads(name: string): Promise<number | null> {
 /** Direct dependencies only: that's where a mistyped name enters the tree. */
 async function flagTyposquats(nodes: DepNode[]): Promise<void> {
   await Promise.allSettled(nodes.filter((n) => n.isDirect).map(async (node) => {
-    const target = typosquatTarget(node.name);
-    if (!target) return;
+    const match = typosquatMatch(node.name);
+    if (!match) return;
+    const { target, exact } = match;
     const downloads = await weeklyDownloads(node.name);
     if (downloads !== null && downloads >= TYPOSQUAT_MAX_WEEKLY_DOWNLOADS) return;
+    // Without download data an edit-distance match alone is too weak to flag
+    if (downloads === null && !exact) return;
     const signal: RiskSignal = {
       type: 'typosquat',
       severity: 'high',
       title: `Possible typosquat of "${target}"`,
-      detail: `"${node.name}" is one typo away from the popular package "${target}"` +
+      detail: `"${node.name}" ${exact ? 'differs from' : 'is one typo away from'} the popular package "${target}"` +
+        (exact ? ' only in punctuation' : '') +
         (downloads !== null ? ` but has only ${downloads.toLocaleString()} downloads a week.` : '.') +
         ' Check this is the package you meant to install.',
     };
@@ -288,6 +359,8 @@ export async function runDepChain(owner: string, repo: string, onProgress?: (det
   // Production deps fill the cap first: they're what actually ships
   const seen = new Set<string>();
   const directDeps = [...prodDeps, ...devDeps].filter(([name, range]) => {
+    // Git urls, workspace links and local paths never resolve via the registry
+    if (!parseSpec(name, range)) return false;
     const key = `${name}@${range}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -298,6 +371,7 @@ export async function runDepChain(owner: string, repo: string, onProgress?: (det
   const ctx: ScanContext = {
     now: Date.now(),
     packuments: new Map(),
+    limit: createLimiter(MAX_REGISTRY_CONCURRENCY),
     nodes: new Map(),
     edges: [],
     releases: new Map(),
