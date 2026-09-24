@@ -45,6 +45,23 @@ create table if not exists public.scan_cache (
   created_at    timestamptz not null default now()
 );
 
+-- True when /start served this scan from scan_cache instead of running scanners.
+alter table public.scans add column if not exists from_cache boolean not null default false;
+
+-- Live per-scanner progress for the scan loader. /run writes one row per
+-- scanner (rows, not a jsonb column, so parallel scanners never overwrite
+-- each other's updates).
+create table if not exists public.scan_progress (
+  scan_id       uuid not null references public.scans(id) on delete cascade,
+  scanner       text not null,
+  status        text not null check (status in ('running', 'done', 'failed')),
+  detail        text,
+  finding_count integer,
+  started_at    timestamptz not null default now(),
+  duration_ms   integer,
+  primary key (scan_id, scanner)
+);
+
 create index if not exists findings_scan_id_idx on public.findings (scan_id);
 create index if not exists scans_repo_url_idx   on public.scans (repo_url);
 
@@ -53,6 +70,7 @@ create index if not exists scans_repo_url_idx   on public.scans (repo_url);
 alter table public.scans      enable row level security;
 alter table public.findings   enable row level security;
 alter table public.scan_cache enable row level security;
+alter table public.scan_progress enable row level security;
 
 -- Make PostgREST pick up the new tables immediately.
 notify pgrst, 'reload schema';

@@ -238,13 +238,13 @@
         "title": "flatmap-stream@0.1.1 — Confirmed Supply Chain Attack",
         "why_dangerous": "A new maintainer (right9ctrl) injected an AES-256 encrypted payload that decrypted at runtime to steal Bitcoin private keys from Copay wallet users. The payload only activated in production environments and remained undetected for 2 months despite 8 million downloads.",
         "exact_fix": "Run: npm audit fix --force. Pin flatmap-stream to >=0.1.2 in package.json. Run npm ci instead of npm install to enforce lockfile. Add npm audit to your CI pipeline.",
-        "real_example": "This is the actual event-stream attack (November 2018). The Copay Bitcoin wallet shipped this dependency and exposed users' private keys. BitPay estimated millions in potential losses."
+        "attack_pattern": "An attacker gains publish rights to a popular but under-maintained package, adds a new dependency carrying an obfuscated payload, and targets it at one downstream application so it stays dormant (and unnoticed) everywhere else."
       },
       {
         "title": "Exposed .env with Live Credentials",
         "why_dangerous": "Your Stripe secret key and database connection string are publicly readable on GitHub. An attacker can extract your Stripe key in under 60 seconds using GitHub code search and charge arbitrary amounts to your Stripe account.",
         "exact_fix": "1. Immediately rotate all keys in the .env file. 2. Run: git filter-branch --force --index-filter 'git rm --cached --ignore-unmatch .env' HEAD. 3. Add .env to .gitignore. 4. Use GitHub's secret scanning alerts for future protection.",
-        "real_example": "In 2022, a developer accidentally committed AWS credentials to a public GitHub repo. Within 4 minutes of the push, automated bots had found the keys and spun up $50,000 in EC2 mining instances."
+        "attack_pattern": "Automated bots continuously scan public commits for credential formats. Leaked keys are typically abused within minutes, for fraudulent charges, data exfiltration or cryptomining, and deleting the file later does not help because the key remains in git history."
       }
     ]
   }

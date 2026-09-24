@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
 import { checkRepoAccess, parseRepoUrl } from '@/lib/github';
 import { rateLimit } from '@/lib/rateLimit';
+import { appOrigin, createAndRunScan } from '@/lib/scanTrigger';
 
 export const maxDuration = 60;
 
@@ -12,7 +13,8 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json().catch(() => ({}));
-  const { repoUrl } = body;
+  // force: user asked for a deep rescan, so skip the cache and run every scanner.
+  const { repoUrl, force } = body;
   if (!repoUrl) return NextResponse.json({ error: 'repoUrl required' }, { status: 400 });
 
   let owner: string, repo: string;
@@ -33,61 +35,42 @@ export async function POST(req: NextRequest) {
   // Normalize the URL to lowercase to prevent case-sensitive cache misses
   const normalizedUrl = `https://github.com/${owner}/${repo}`.toLowerCase();
 
-  // Check cache first (6-hour TTL)
-  const { data: cached } = await supabaseAdmin
-    .from('scan_cache')
-    .select('*')
-    .eq('repo_url', normalizedUrl)
-    .gt('expires_at', new Date().toISOString())
-    .single();
+  // Check cache first (6-hour TTL), unless a deep rescan was requested
+  const { data: cached } = force === true
+    ? { data: null }
+    : await supabaseAdmin
+      .from('scan_cache')
+      .select('*')
+      .eq('repo_url', normalizedUrl)
+      .gt('expires_at', new Date().toISOString())
+      .single();
 
   if (cached) {
-    const { data: existingScan } = await supabaseAdmin
+    const row = {
+      repo_url: normalizedUrl,
+      repo_owner: owner,
+      repo_name: repo,
+      status: 'completed',
+      threat_score: cached.threat_score,
+    };
+    let { data: existingScan, error } = await supabaseAdmin
       .from('scans')
-      .insert({
-        repo_url: normalizedUrl,
-        repo_owner: owner,
-        repo_name: repo,
-        status: 'completed',
-        threat_score: cached.threat_score,
-      })
+      .insert({ ...row, from_cache: true })
       .select()
       .single();
-    return NextResponse.json({ scanId: existingScan?.id });
+    // Databases not yet migrated lack from_cache; still serve the cached scan.
+    if (error) {
+      ({ data: existingScan, error } = await supabaseAdmin.from('scans').insert(row).select().single());
+    }
+    if (error || !existingScan) {
+      return NextResponse.json({ error: error?.message ?? 'Failed to create scan' }, { status: 500 });
+    }
+    return NextResponse.json({ scanId: existingScan.id });
   }
 
-  // Create scan record
-  const { data: scan, error } = await supabaseAdmin
-    .from('scans')
-    .insert({ repo_url: normalizedUrl, repo_owner: owner, repo_name: repo, status: 'scanning' })
-    .select()
-    .single();
-
-  if (error || !scan) {
-    console.error('Supabase insert failed:', error);
-    return NextResponse.json({ error: error?.message ?? 'Failed to create scan' }, { status: 500 });
+  const result = await createAndRunScan(owner, repo, appOrigin(req.nextUrl?.origin));
+  if ('error' in result) {
+    return NextResponse.json({ error: result.error }, { status: 500 });
   }
-
-  // Trigger the run route — AWAITED with a short timeout.
-  // This guarantees the request actually leaves before this function
-  // terminates. We don't wait for the full scan, just for /run to
-  // accept the trigger (it runs the real work independently afterward).
-  const appUrl = req.nextUrl?.origin || process.env.NEXT_PUBLIC_APP_URL || 'https://specter-seven.vercel.app';
-  try {
-    await fetch(`${appUrl}/api/scan/${scan.id}/run`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-internal-secret': process.env.INTERNAL_SECRET ?? 'specter-internal',
-      },
-      signal: AbortSignal.timeout(3000),
-    });
-  } catch (err) {
-    console.error('Failed to trigger run route:', err);
-    // Don't fail the whole request — the scan row exists, the frontend
-    // can still poll it. But this log line is how we'll catch this
-    // happening again in Vercel logs.
-  }
-
-  return NextResponse.json({ scanId: scan.id });
+  return NextResponse.json({ scanId: result.scanId });
 }

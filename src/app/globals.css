@@ -17,7 +17,7 @@
   --color-ink:        #8fa8cc;
   --color-specter:    #d4e4f7;
   --color-critical:   #FF2A6D;
-  --color-high:       #F59E0B;
+  --color-high:       #FF7A1A;
   --color-medium:     #eab308;
   --color-safe:       #22c55e;
   --color-accent:     #00F0FF;
@@ -53,8 +53,8 @@
   --critical:     #FF2A6D;
   --critical-dim: #2d0a16;
   --critical-glow:#ff2a6d33;
-  --high:         #F59E0B;
-  --high-dim:     #2d1c00;
+  --high:         #FF7A1A;
+  --high-dim:     #2d1300;
   --medium:       #eab308;
   --medium-dim:   #1f1800;
   --safe:         #22c55e;

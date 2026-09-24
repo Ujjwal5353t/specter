@@ -23,7 +23,8 @@ function statusFor(key: string, result: ScanResult): Status {
     case 'depchain': {
       const d = result.depchain;
       if (!d) return 'inactive';
-      return d.vulnCount > 0 ? 'vulnerable' : 'clean';
+      if (d.vulnCount > 0) return 'vulnerable';
+      return (d.riskCount ?? 0) > 0 ? 'warning' : 'clean';
     }
     case 'ghostcommit': {
       const g = result.ghostcommit;
