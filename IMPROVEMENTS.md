@@ -21,10 +21,15 @@ code right now**. Re-confirmed via `grep` on 2026-09-23:
   `setTimeout(resolve, 0)` every 80 lines. Four independent layers, not just the regex fix alone,
   since the earlier version of this fix regressed once already — see the top note above this list
   for why nothing here should be assumed permanent until it's committed.
-- [ ] **Supabase client crashes on missing config again.** `src/lib/supabase.ts` still has the
-  `SUPABASE_SECRET_KEY`/`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` fallback (that part survived), but
-  the lazy-instantiation Proxy is gone — `createClient()` runs at module import time again, so a
-  fresh clone with no `.env.local` at all still crashes every route and blocks `next build`.
+- [x] ~~**Supabase client crashes on missing config again.**~~ **Resolved (2026-09-24, GitHub
+  Issue #3, `pratham27-pro`):** `src/lib/supabase.ts` now wraps each client in a Proxy that defers
+  `createClient()` — and the env-var validation that goes with it — until the first actual
+  property access (e.g. `.from(...)`), not module import time. A missing/misconfigured var now
+  throws a descriptive `[Supabase Configuration Error] Missing environment variable(s): ...`
+  message instead of an unhandled `TypeError`, and only when that specific client is actually
+  used. Live-verified two ways: `next build` succeeds with all five Supabase env vars blanked out
+  (previously failed outright at "Collecting page data"), and a real scan against the dev server
+  with valid config still completes normally end-to-end.
 - [ ] **`npm audit` is back to 11 vulnerabilities, 1 critical.** `next` is pinned at `16.2.9`
   again (was patched to `16.3.6`). `npm audit fix` resolves this with no breaking changes — it's
   a same-range patch bump, not a major version jump.
@@ -83,8 +88,9 @@ or don't match what's actually implemented. Cross-checked against every source f
 - [x] ~~**Server hang on real scans**~~ — Fixed: bounded regex quantifiers, per-file patch caps
   (60KB / 1,000 lines), a 1,500-char line-length guard, and periodic event-loop yields in
   `ghostcommit.ts` (see the top section for full detail).
-- [ ] **Supabase crashes the app on missing/misconfigured env vars** instead of degrading
-  gracefully (see top section).
+- [x] ~~**Supabase crashes the app on missing/misconfigured env vars**~~ — Fixed: lazy Proxy
+  instantiation in `src/lib/supabase.ts`, descriptive error only on first actual use, live-verified
+  via a clean `next build` with all Supabase env vars unset (see the top section for full detail).
 - [ ] **`npm audit fix`** — 11 vulnerabilities, 1 critical, in the pinned `next@16.2.9`.
 
 ## 🟠 Confirmed bugs
