@@ -1,4 +1,20 @@
-import type { DepNode } from '@/types';
+import type { DepNode, Severity } from '@/types';
+
+/**
+ * Colours of the 3D scene, shared with the on-screen legend so the two can't
+ * drift. Vulnerability tiers match the sidebar's severity tags.
+ */
+export const SCENE_COLORS = {
+  critical: '#FF2A6D',
+  high: '#FF7A1A',
+  medium: '#eab308',
+  low: '#8fa8cc',
+  riskSignal: '#a78bfa',
+  direct: '#00F0FF',
+  transitive: '#0e6fa8',
+  authed: '#22c55e',
+  unauthed: '#F59E0B',
+} as const;
 
 /**
  * Deterministic [0,1) value derived from a string id (FNV-1a hash).
@@ -56,16 +72,34 @@ export interface NodeVisual {
   pulse: boolean;
 }
 
-/** Severity-driven sizing/coloring, shared by DepGraph and AttackPaths. */
-export function nodeVisual(node: DepNode): NodeVisual {
-  const isCritical = node.cves?.some((c) => c.severity === 'critical') ?? false;
-  const isVuln = (node.cves?.length ?? 0) > 0;
+/** True when a node carries a supply-chain risk signal worth surfacing (medium or worse). */
+export function hasRiskSignal(node: DepNode): boolean {
+  return node.signals?.some((s) => s.severity !== 'low' && s.severity !== 'info') ?? false;
+}
 
-  if (isCritical) return { radius: 5.5, color: '#FF2A6D', emissiveIntensity: 1.1, pulse: true };
-  if (isVuln) return { radius: 4, color: '#F59E0B', emissiveIntensity: 0.7, pulse: false };
+const SEVERITY_RANK: Record<Severity, number> = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
+
+/** The most severe advisory on a node, or null if it has none. */
+export function worstCveSeverity(node: DepNode): Severity | null {
+  let worst: Severity | null = null;
+  for (const c of node.cves ?? []) {
+    if (!worst || SEVERITY_RANK[c.severity] > SEVERITY_RANK[worst]) worst = c.severity;
+  }
+  return worst;
+}
+
+/** Severity-driven sizing/coloring: a vulnerable node takes its worst advisory's tier. */
+export function nodeVisual(node: DepNode): NodeVisual {
+  const worst = worstCveSeverity(node);
+
+  if (worst === 'critical') return { radius: 5.5, color: SCENE_COLORS.critical, emissiveIntensity: 1.1, pulse: true };
+  if (worst === 'high') return { radius: 4.8, color: SCENE_COLORS.high, emissiveIntensity: 0.8, pulse: false };
+  if (worst === 'medium') return { radius: 4, color: SCENE_COLORS.medium, emissiveIntensity: 0.7, pulse: false };
+  if (worst) return { radius: 3.2, color: SCENE_COLORS.low, emissiveIntensity: 0.5, pulse: false };
+  if (hasRiskSignal(node)) return { radius: 3.5, color: SCENE_COLORS.riskSignal, emissiveIntensity: 0.6, pulse: false };
   return {
     radius: node.isDirect ? 2.6 : 1.8,
-    color: node.isDirect ? '#00F0FF' : '#0e6fa8',
+    color: node.isDirect ? SCENE_COLORS.direct : SCENE_COLORS.transitive,
     emissiveIntensity: node.isDirect ? 0.45 : 0.2,
     pulse: false,
   };

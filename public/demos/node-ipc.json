@@ -54,7 +54,7 @@
         "title": "node-ipc@9.2.2 — Intentional Protestware",
         "why_dangerous": "The package maintainer deliberately published code that checks the user's IP geolocation and overwrites files with a peace symbol emoji if the IP resolves to Russia or Belarus. This is intentional sabotage by a trusted maintainer — the worst kind of supply chain attack.",
         "exact_fix": "Pin node-ipc to >=10.1.1 in package.json. Run npm ci. Add a pre-install script to audit for known bad package versions.",
-        "real_example": "This is the real node-ipc incident from March 2022. It directly affected vue-cli which has 30+ million weekly downloads. Many enterprise CI pipelines were disrupted."
+        "attack_pattern": "A trusted maintainer publishes a malicious release of their own package. Because semver ranges pull the new version automatically, the payload reaches every downstream project that installs without a lockfile or runs a fresh update."
       }
     ]
   }

@@ -23,12 +23,13 @@ function computeBreakdown(r: ScanResult) {
   const layerScore = layerFindings.reduce((a, f) => a + (SEV_WEIGHT[f.severity] ?? 0), 0);
 
   const vulnDeps = r.depchain?.vulnCount ?? 0;
+  const riskyDeps = r.depchain?.riskCount ?? 0;
   const secretsCount = r.ghostcommit?.findings?.length ?? 0;
   const unsecuredApis = r.apibleed?.unsecuredCount ?? 0;
 
   return [
     { label: 'INFRA', value: Math.min(envScore + layerScore, 40), max: 40, color: '#F59E0B' },
-    { label: 'DEPENDENCIES', value: Math.min(vulnDeps * 8, 30), max: 30, color: '#FF2A6D' },
+    { label: 'DEPENDENCIES', value: Math.min(vulnDeps * 8 + riskyDeps * 4, 30), max: 30, color: '#FF2A6D' },
     { label: 'SECRETS', value: Math.min(secretsCount * 10, 20), max: 20, color: '#eab308' },
     { label: 'CODE/API', value: Math.min(unsecuredApis * 5, 10), max: 10, color: '#00F0FF' },
   ];

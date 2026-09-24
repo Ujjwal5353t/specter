@@ -9,9 +9,16 @@ import SpecterLogo from '@/components/ui/SpecterLogo';
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useScanStore } from '@/store/scanStore';
+import { useScanStore, resultFromStatus, type ScanStatusResponse } from '@/store/scanStore';
 import { generateReport } from '@/lib/report';
 import type { ScanResult } from '@/types';
+
+function timeAgo(iso: string): string {
+  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  return `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
+}
 
 interface SidebarProps {
   scanResult: ScanResult;
@@ -19,18 +26,36 @@ interface SidebarProps {
   onFilterChange: (scanner: string | null) => void;
   onExportPdf: () => void;
   pdfLoading: boolean;
+  onRescan: () => void;
+  rescanning: boolean;
 }
 
 // Extracted to module scope (was previously declared inside ScanPage's body,
 // which recreated it — and remounted the whole sidebar, losing expanded-
 // finding state and replaying every entrance animation — on every unrelated
 // re-render, e.g. dragging the mobile sheet).
-function ScanSidebar({ scanResult, scannerFilter, onFilterChange, onExportPdf, pdfLoading }: SidebarProps) {
+function ScanSidebar({ scanResult, scannerFilter, onFilterChange, onExportPdf, pdfLoading, onRescan, rescanning }: SidebarProps) {
   return (
     <>
       <div className="scan-line-effect absolute inset-0 pointer-events-none z-10 overflow-hidden rounded-none" />
       <div className="px-5 md:pt-16 pt-2 pb-4 shrink-0 relative z-20" style={{ borderBottom: '1px solid var(--border)' }}>
-        <div className="absolute top-4 right-5 z-20">
+        <div className="absolute top-4 right-5 z-20 flex items-center gap-2">
+          <button
+            onClick={onRescan}
+            disabled={rescanning}
+            title="Ignore cached results and run every scanner again. Slower, but reflects the latest repo state and scanner fixes."
+            className="tactical-btn flex items-center gap-2 px-3 py-1.5 rounded-sm cursor-pointer disabled:opacity-60"
+            style={{ color: 'var(--ink)' }}
+          >
+            {rescanning ? (
+              <span className="w-2.5 h-2.5 rounded-full border-2 border-t-transparent animate-spin" style={{ borderColor: 'var(--accent-hi) transparent transparent transparent' }} />
+            ) : (
+              <svg width="11" height="11" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M10 6a4 4 0 1 1-1.2-2.85M10 1.5v2.5H7.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            )}
+            <span className="font-mono text-[10px] tracking-wider">{rescanning ? 'STARTING…' : 'DEEP RESCAN'}</span>
+          </button>
           <button
             onClick={onExportPdf}
             disabled={pdfLoading}
@@ -49,6 +74,26 @@ function ScanSidebar({ scanResult, scannerFilter, onFilterChange, onExportPdf, p
         </div>
         <ThreatGauge result={scanResult} />
       </div>
+
+      {/* A cached result skipped the scanners entirely — say so, and point at the fresh-data path */}
+      {scanResult.fromCache && (
+        <div
+          className="px-5 py-2 shrink-0 relative z-20 flex items-center justify-between gap-3"
+          style={{ borderBottom: '1px solid var(--border)', background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}
+        >
+          <span className="font-mono text-[9px] tracking-wider uppercase" style={{ color: 'var(--ink)' }}>
+            Cached result{scanResult.scannedAt ? ` · scanned ${timeAgo(scanResult.scannedAt)}` : ''}
+          </span>
+          <button
+            onClick={onRescan}
+            disabled={rescanning}
+            className="font-mono text-[9px] tracking-wider uppercase cursor-pointer disabled:opacity-60 shrink-0"
+            style={{ color: 'var(--accent-hi)' }}
+          >
+            ▶ deep rescan for fresh data
+          </button>
+        </div>
+      )}
 
       <div className="px-5 py-3 shrink-0 relative z-20" style={{ borderBottom: '1px solid var(--border)' }}>
         <ScannerBadges result={scanResult} activeFilter={scannerFilter} onFilterChange={onFilterChange} />
@@ -91,6 +136,7 @@ export default function ScanPage() {
   const [isMobileExpanded, setIsMobileExpanded] = useState(false);
   const [scannerFilter, setScannerFilter] = useState<string | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
+  const [rescanning, setRescanning] = useState(false);
 
   const handleBack = () => {
     reset();
@@ -110,19 +156,9 @@ export default function ScanPage() {
       try {
         const res = await fetch(`/api/scan/${scanId}/status`);
         if (!res.ok) return;
-        const data = await res.json();
+        const data: ScanStatusResponse = await res.json();
         if (data.scan?.status === 'completed') {
-          setScanResult({
-            scanId,
-            repoUrl: data.scan.repo_url,
-            status: 'completed',
-            threatScore: data.scan.threat_score ?? 0,
-            depchain: data.cache?.dep_data ?? undefined,
-            ghostcommit: data.cache?.secret_data ?? undefined,
-            layerscan: data.cache?.docker_data ?? undefined,
-            apibleed: data.cache?.api_data ?? undefined,
-            envtrace: data.cache?.env_data ?? undefined,
-          });
+          setScanResult(resultFromStatus(scanId, data));
         } else if (data.scan?.status === 'scanning' || data.scan?.status === 'pending') {
           startPolling(scanId);
         } else if (data.scan?.status === 'failed') {
@@ -143,6 +179,9 @@ export default function ScanPage() {
       ...(scanResult.depchain?.nodes?.filter((n) => (n.cves?.length ?? 0) > 0).flatMap((n) =>
         n.cves.map((c) => ({ scanner: 'depchain', title: `${n.name}@${n.version}`, detail: c.summary, severity: c.severity }))
       ) ?? []),
+      ...(scanResult.depchain?.nodes?.flatMap((n) =>
+        (n.signals ?? []).filter((s) => s.severity !== 'low').map((s) => ({ scanner: 'depchain', title: `${s.title}: ${n.name}@${n.version}`, detail: s.detail, severity: s.severity }))
+      ) ?? []),
       ...(scanResult.ghostcommit?.findings?.map((f) => ({ scanner: 'ghostcommit', title: f.type, detail: f.file, severity: 'critical' as const })) ?? []),
       ...(scanResult.layerscan?.findings?.map((f) => ({ scanner: 'layerscan', title: f.issue.substring(0, 60), detail: f.fix, severity: f.severity })) ?? []),
       ...(scanResult.apibleed?.endpoints?.filter((e) => e.issues.length > 0).map((e) => ({ scanner: 'apibleed', title: `${e.method} ${e.path}`, detail: e.issues[0], severity: e.severity })) ?? []),
@@ -153,6 +192,11 @@ export default function ScanPage() {
       fetch('/api/explain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ findings: allFindings }) })
         .then((r) => r.json())
         .then((data) => {
+          // Error responses ({ error }) have no items array and would crash AIPanel.
+          if (!data || typeof data.summary !== 'string' || !Array.isArray(data.items)) {
+            console.error('AI brief unavailable:', data?.error ?? data);
+            return;
+          }
           useScanStore.setState((s) => ({ scanResult: s.scanResult ? { ...s.scanResult, aiExplanation: data } : s.scanResult }));
         })
         .catch(() => {});
@@ -160,6 +204,30 @@ export default function ScanPage() {
     // `aiRef.current.fetched` guards against re-firing when `scanResult`
     // changes again after the AI explanation merges back in below.
   }, [scanResult]);
+
+  // Deep rescan: bypass the 6h cache so every scanner runs against the repo again.
+  const handleRescan = async () => {
+    if (!scanResult || rescanning) return;
+    setRescanning(true);
+    try {
+      const res = await fetch('/api/scan/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repoUrl: scanResult.repoUrl, force: true }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.scanId) throw new Error(data.error ?? 'Rescan failed to start');
+      // Let the AI brief and rehydration run again for the new scan.
+      aiRef.current.fetched = false;
+      hydrateRef.current = true;
+      startPolling(data.scanId);
+      router.push(`/scan/${data.scanId}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Rescan failed to start');
+    } finally {
+      setRescanning(false);
+    }
+  };
 
   const handleExportPdf = async () => {
     if (!scanResult) return;
@@ -230,6 +298,8 @@ export default function ScanPage() {
                 onFilterChange={setScannerFilter}
                 onExportPdf={handleExportPdf}
                 pdfLoading={pdfLoading}
+                onRescan={handleRescan}
+                rescanning={rescanning}
               />
             </motion.aside>
 
@@ -267,6 +337,8 @@ export default function ScanPage() {
                 onFilterChange={setScannerFilter}
                 onExportPdf={handleExportPdf}
                 pdfLoading={pdfLoading}
+                onRescan={handleRescan}
+                rescanning={rescanning}
               />
             </motion.aside>
           </>
