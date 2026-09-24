@@ -22,6 +22,21 @@ Specter runs 5 specialized scanners in parallel to generate a holistic threat sc
 | **APIBleed**    | Maps public API surfaces to identify unauthenticated write-endpoints and missing rate limits.      |
 | **EnvTrace**    | Traces source code for hardcoded credentials and detects insecure environment file commits.        |
 
+### How the threat score works
+
+The score is a transparent, additive model, not a statistical one. Four buckets each have a cap, so no single category can saturate the score on its own, and the caps sum to 100:
+
+| Bucket           | Formula (`calcThreatScore`)                                              | Cap | Why                                                                                                            |
+| ---------------- | ------------------------------------------------------------------------ | --- | -------------------------------------------------------------------------------------------------------------- |
+| **Infra**        | `Σ severity weight` over EnvTrace + LayerScan findings                   | 40  | Largest bucket: misconfiguration is the most common way a repo is compromised, and it is cheap to fix.          |
+| **Dependencies** | `8 × vulnerable packages + 4 × packages with a supply-chain risk signal` | 30  | A known-vulnerable package is a confirmed weakness; a heuristic risk signal is only a warning, so it weighs half. |
+| **Secrets**      | `10 × secrets found in recent commits`                                   | 20  | A leaked secret is exploitable immediately, but two or three already means "rotate everything".                 |
+| **Code / API**   | `5 × unauthenticated write endpoints`                                    | 10  | Heuristic route detection has the highest false-positive rate, so it gets the smallest share.                   |
+
+Severity weights: critical 15, high 8, medium 4, low 1, info 0. Bands: 0-9 nominal, 10-39 elevated, 40-69 high, 70+ critical.
+
+The weights and caps are hand-chosen ordinal judgements (confirmed and exploitable beats heuristic), not derived from CVSS aggregation or a benchmark. Read the score as a triage ranking and use the per-finding severities for the actual decisions. A scanner that fails contributes 0 rather than failing the scan.
+
 ---
 
 ## 🚀 Key Features
