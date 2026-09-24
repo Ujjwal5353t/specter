@@ -2,9 +2,55 @@
 import { motion } from 'framer-motion';
 import type { AIExplanation } from '@/types';
 
-interface Props { explanation: AIExplanation; }
+export type AIStatus = 'idle' | 'loading' | 'ok' | 'unconfigured' | 'failed';
 
-export default function AIPanel({ explanation }: Props) {
+interface Props {
+  explanation?: AIExplanation | null;
+  status?: AIStatus;
+  onRetry?: () => void;
+}
+
+export default function AIPanel({ explanation, status = 'ok', onRetry }: Props) {
+  if (!explanation) {
+    if (status === 'idle' || status === 'ok') return null;
+    return (
+      <div className="px-5 pb-6">
+        <div className="flex items-center gap-2 my-4">
+          <span className="font-mono text-[9px] tracking-[0.2em] uppercase" style={{ color: 'var(--muted)' }}>
+            ▶ AI INTELLIGENCE BRIEF
+          </span>
+          <div className="flex-1 h-px" style={{ background: 'var(--border)' }} />
+        </div>
+        {status === 'loading' && (
+          <p className="font-mono text-[9px] tracking-wide animate-pulse" style={{ color: 'var(--muted)' }}>
+            generating brief...
+          </p>
+        )}
+        {status === 'unconfigured' && (
+          <p className="font-mono text-[9px] tracking-wide" style={{ color: 'var(--muted)' }}>
+            AI brief unavailable (no API key configured)
+          </p>
+        )}
+        {status === 'failed' && (
+          <div className="flex items-center justify-between gap-3">
+            <p className="font-mono text-[9px] tracking-wide" style={{ color: 'var(--high)' }}>
+              AI brief failed to load
+            </p>
+            {onRetry && (
+              <button
+                onClick={onRetry}
+                className="tactical-btn font-mono text-[9px] tracking-wider uppercase px-2.5 py-1 rounded-sm cursor-pointer shrink-0"
+                style={{ color: 'var(--ink)' }}
+              >
+                Retry
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <motion.div
       className="px-5 pb-6"
@@ -43,7 +89,7 @@ export default function AIPanel({ explanation }: Props) {
 
       {/* Individual items — analyst breakdown per finding */}
       <div className="space-y-3">
-        {explanation.items.map((item, i) => (
+        {(explanation.items ?? []).map((item, i) => (
           <motion.div
             key={i}
             className="rounded-sm overflow-hidden"
