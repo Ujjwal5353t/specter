@@ -10,8 +10,12 @@ create table if not exists public.scans (
                 check (status in ('pending', 'scanning', 'completed', 'failed')),
   threat_score  integer,
   created_at    timestamptz not null default now(),
-  completed_at  timestamptz
+  completed_at  timestamptz,
+  error_message text
 );
+
+-- For databases created before error_message existed.
+alter table public.scans add column if not exists error_message text;
 
 create table if not exists public.findings (
   id            uuid primary key default gen_random_uuid(),

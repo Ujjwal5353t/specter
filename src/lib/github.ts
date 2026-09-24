@@ -5,6 +5,12 @@ export const octokit = new Octokit({
   request: { timeout: 10000 },
 });
 
+// HTTP status of an Octokit request error, or undefined for anything else
+export function githubErrorStatus(err: unknown): number | undefined {
+  const status = (err as { status?: unknown })?.status;
+  return typeof status === 'number' ? status : undefined;
+}
+
 export function parseRepoUrl(url: string): { owner: string; repo: string } {
   const cleaned = url
     .trim()
@@ -17,6 +23,38 @@ export function parseRepoUrl(url: string): { owner: string; repo: string } {
     throw new Error('Invalid GitHub URL. Use: https://github.com/owner/repo');
   }
   return { owner: parts[0], repo: parts[1] };
+}
+
+// Confirms the repo exists and is readable with our token. Scanners swallow
+// API errors and return empty results, so without this gate a private or
+// misspelled repo would score as "clean" instead of failing.
+export async function checkRepoAccess(
+  owner: string,
+  repo: string
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  try {
+    await octokit.repos.get({ owner, repo });
+    return { ok: true };
+  } catch (err) {
+    const status = githubErrorStatus(err);
+    const rateLimited =
+      (err as { response?: { headers?: Record<string, string> } }).response?.headers?.[
+        'x-ratelimit-remaining'
+      ] === '0';
+    if (status === 404) {
+      return {
+        ok: false,
+        reason: `Repository ${owner}/${repo} was not found or is private. Specter can only scan public repos.`,
+      };
+    }
+    if ((status === 403 || status === 429) && rateLimited) {
+      return { ok: false, reason: 'GitHub API rate limit reached. Try again in a few minutes.' };
+    }
+    if (status === 401 || status === 403) {
+      return { ok: false, reason: `Access to ${owner}/${repo} was denied by GitHub.` };
+    }
+    return { ok: false, reason: `Could not reach GitHub to access ${owner}/${repo}.` };
+  }
 }
 
 // In-memory cache to avoid redundant GitHub API calls within the same scan
@@ -38,7 +76,10 @@ export async function getFileContent(
     const content = Buffer.from(res.data.content, 'base64').toString('utf-8');
     fileCache.set(key, content);
     return content;
-  } catch {
+  } catch (err) {
+    // Only a 404 means "file doesn't exist". Anything else (rate limit, repo
+    // gone private mid-scan, network) must fail the scan, not read as absent.
+    if (githubErrorStatus(err) !== 404) throw err;
     fileCache.set(key, null);
     return null;
   }
@@ -48,9 +89,9 @@ export async function getRepoTree(
   owner: string,
   repo: string
 ): Promise<{ path: string; type: string }[]> {
+  const ref = await octokit.repos.get({ owner, repo });
+  const defaultBranch = ref.data.default_branch;
   try {
-    const ref = await octokit.repos.get({ owner, repo });
-    const defaultBranch = ref.data.default_branch;
     const res = await octokit.git.getTree({
       owner,
       repo,
@@ -60,8 +101,10 @@ export async function getRepoTree(
     return res.data.tree
       .filter((f) => f.type === 'blob')
       .map((f) => ({ path: f.path || '', type: f.type || '' }));
-  } catch {
-    return [];
+  } catch (err) {
+    // 409 = repo has no commits yet: a genuinely empty tree
+    if (githubErrorStatus(err) === 409) return [];
+    throw err;
   }
 }
 
