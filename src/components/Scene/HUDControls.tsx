@@ -20,7 +20,10 @@ const FILTERS: { value: LayerFilter; label: string }[] = [
 
 export default function HUDControls({ filter, onFilterChange, layoutMode, onLayoutModeChange, onFocusCore }: Props) {
   return (
-    <div className="absolute bottom-6 right-6 z-30 flex flex-col items-end gap-2 pointer-events-auto">
+    // Kept clear of the scan sidebar: beside the gimbal (bottom-left) on desktop,
+    // where the sidebar covers the right edge; top-right on mobile, where the
+    // results sheet covers the bottom.
+    <div className="absolute top-6 right-4 items-end md:top-auto md:right-auto md:bottom-6 md:left-28 md:items-start z-30 flex flex-col gap-2 pointer-events-auto max-w-[calc(100vw-32px)]">
       <div className="glass-panel rounded-sm px-2 py-1.5 flex items-center gap-1.5">
         <button
           onClick={onFocusCore}
@@ -39,7 +42,7 @@ export default function HUDControls({ filter, onFilterChange, layoutMode, onLayo
         </button>
       </div>
 
-      <div className="glass-panel rounded-sm px-2 py-1.5 flex items-center gap-1">
+      <div className="glass-panel rounded-sm px-2 py-1.5 flex flex-wrap justify-end md:justify-start items-center gap-1">
         {FILTERS.map((f) => (
           <button
             key={f.value}

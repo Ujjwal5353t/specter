@@ -79,7 +79,7 @@ export const useScanStore = create<ScanStore>((set, get) => ({
   startPolling: (scanId: string) => {
     // Drop any previous scan's result/error so they can't bleed into this one
     get().stopPolling();
-    set({ isPolling: true, scanResult: null, error: null, progress: null });
+    set({ isPolling: true, scanResult: null, error: null, progress: null, selectedNode: null, sidebarOpen: false });
     pollInterval = setInterval(async () => {
       try {
         const res = await fetch(`/api/scan/${scanId}/status`);

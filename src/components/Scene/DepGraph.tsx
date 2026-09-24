@@ -26,11 +26,16 @@ function DepSphere({
   const isSelected = selectedNode === node.id;
   const showLabel = hovered || isSelected || visual.pulse;
 
+  const ringRef = useRef<THREE.Mesh>(null);
+
   useFrame(({ clock }) => {
+    if (ringRef.current) ringRef.current.rotation.z = clock.elapsedTime * 1.2;
     if (!meshRef.current) return;
     if (visual.pulse) {
-      const s = 1 + 0.12 * Math.sin(clock.elapsedTime * 3.2);
+      const s = (isSelected ? 1.3 : 1) + 0.12 * Math.sin(clock.elapsedTime * 3.2);
       meshRef.current.scale.setScalar(s);
+    } else if (isSelected) {
+      meshRef.current.scale.setScalar(1.35);
     } else if (hovered) {
       meshRef.current.scale.setScalar(1.25);
     } else {
@@ -45,7 +50,7 @@ function DepSphere({
         args={[visual.radius, 24, 24]}
         onPointerOver={(e) => { e.stopPropagation(); onHover(node.id); document.body.style.cursor = 'pointer'; }}
         onPointerOut={(e) => { e.stopPropagation(); onHover(null); document.body.style.cursor = 'auto'; }}
-        onClick={(e) => { e.stopPropagation(); setSelectedNode(node.id); }}
+        onClick={(e) => { e.stopPropagation(); setSelectedNode(isSelected ? null : node.id); }}
       >
         <meshStandardMaterial
           color={visual.color}
@@ -58,6 +63,16 @@ function DepSphere({
 
       {visual.pulse && <pointLight color={visual.color} intensity={2.2} distance={22} />}
 
+      {/* Selection marker: a spinning, camera-facing ring around the picked node */}
+      {isSelected && (
+        <Billboard follow>
+          <mesh ref={ringRef}>
+            <ringGeometry args={[visual.radius * 1.35 + 3, visual.radius * 1.35 + 3.8, 48, 1, 0, Math.PI * 1.6]} />
+            <meshBasicMaterial color="#ffffff" transparent opacity={0.9} side={THREE.DoubleSide} />
+          </mesh>
+        </Billboard>
+      )}
+
       {((node.cves?.length ?? 0) > 0 || hasRiskSignal(node)) && (
         <Sphere args={[visual.radius + 2.5, 12, 12]}>
           <meshBasicMaterial color={visual.color} transparent opacity={0.1} wireframe />
@@ -67,7 +82,7 @@ function DepSphere({
       {showLabel && (
         <Billboard follow lockX={false} lockY={false} lockZ={false}>
           <Text
-            position={[0, visual.radius + 3.5, 0]}
+            position={[0, visual.radius + 3.5 + (isSelected ? visual.radius * 0.35 + 3 : 0), 0]}
             fontSize={2.8}
             color="#eaf4ff"
             outlineWidth={0.18}

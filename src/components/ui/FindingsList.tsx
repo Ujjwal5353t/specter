@@ -1,7 +1,9 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import type { ScanResult, Severity } from '@/types';
+import semver from 'semver';
+import { useScanStore } from '@/store/scanStore';
+import type { DepNode, ScanResult, Severity } from '@/types';
 
 interface Props {
   result: ScanResult;
@@ -19,6 +21,11 @@ interface Finding {
   filePath?: string;
   line?: number;
   entropy?: number;
+  /** Dependency node this finding belongs to, for focusing a node picked in the 3D map. */
+  nodeId?: string;
+  /** Advisory id (GHSA/CVE) for dependency vulnerabilities. */
+  advisoryId?: string;
+  fixedIn?: string;
 }
 
 const SEV_CONFIG: Record<Severity, { color: string; label: string }> = {
@@ -38,11 +45,13 @@ function extractFindings(r: ScanResult): Finding[] {
     .forEach((n) => n.cves.forEach((c) => out.push({
       id: `dep-${n.id}-${c.id}`, scanner: 'depchain',
       severity: c.severity, title: `${n.name}@${n.version}`, detail: c.summary,
+      nodeId: n.id, advisoryId: c.id, fixedIn: c.fixed_in,
     })));
 
   r.depchain?.nodes.forEach((n) => (n.signals ?? []).forEach((s) => out.push({
     id: `risk-${n.id}-${s.type}`, scanner: 'depchain',
     severity: s.severity, title: `${s.title} · ${n.name}@${n.version}`, detail: s.detail,
+    nodeId: n.id,
   })));
 
   r.ghostcommit?.findings.forEach((f, i) => out.push({
@@ -93,17 +102,115 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-export default function FindingsList({ result, scannerFilter, hasAiExplanation, onRequestAiFocus }: Props) {
-  const [expanded, setExpanded] = useState<string | null>(null);
-  let findings = extractFindings(result);
-  if (scannerFilter) findings = findings.filter((f) => f.scanner === scannerFilter);
+const SEV_TIERS: Severity[] = ['critical', 'high', 'medium', 'low'];
+
+/** Summary of the dependency node picked in the 3D map. */
+function NodeFocusCard({ node, result, onClear }: { node: DepNode; result: ScanResult; onClear: () => void }) {
+  const counts = SEV_TIERS
+    .map((sev) => ({ sev, n: node.cves.filter((c) => c.severity === sev).length }))
+    .filter((c) => c.n > 0);
+
+  // Who pulls this package in; the root means it's a direct dependency.
+  const nodes = result.depchain?.nodes ?? [];
+  const parents = (result.depchain?.edges ?? [])
+    .filter((e) => e.to === node.id)
+    .map((e) => nodes.find((n) => n.id === e.from))
+    .filter((n): n is DepNode => !!n);
+  const direct = node.isDirect || parents.some((p) => p.isRoot);
+  const via = parents.filter((p) => !p.isRoot).map((p) => p.name);
+
+  // Highest version any advisory lists as fixed: the upgrade that clears the most.
+  const fixes = node.cves.map((c) => c.fixed_in).filter((v): v is string => !!v && !!semver.valid(v));
+  const upgradeTo = fixes.length > 0 ? [...fixes].sort(semver.rcompare)[0] : null;
+  const unfixed = node.cves.filter((c) => !c.fixed_in).length;
 
   return (
-    <div className="px-5 py-4">
+    <div className="glass-panel rounded-sm p-3 mb-3" style={{ borderColor: 'var(--border-hi)' }}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="font-mono text-[8px] tracking-[0.2em] uppercase mb-1" style={{ color: 'var(--accent-hi)' }}>
+            ◉ Selected in map
+          </p>
+          <p className="font-mono text-[12px] font-bold truncate" style={{ color: 'var(--white)' }}>
+            {node.name}@{node.version}
+          </p>
+        </div>
+        <button
+          onClick={onClear}
+          aria-label="Clear node selection"
+          className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-sm shrink-0 cursor-pointer"
+          style={{ color: 'var(--ink)', border: '1px solid var(--border-hi)' }}
+        >
+          ✕ clear
+        </button>
+      </div>
+
+      <p className="font-mono text-[9px] mt-1.5" style={{ color: 'var(--muted)' }}>
+        {direct ? 'Direct dependency' : 'Transitive dependency'}
+        {via.length > 0 && ` · via ${via.slice(0, 3).join(', ')}${via.length > 3 ? ` +${via.length - 3}` : ''}`}
+      </p>
+
+      {counts.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5 mt-2">
+          {counts.map(({ sev, n }) => {
+            const color = SEV_CONFIG[sev].color;
+            return (
+              <span
+                key={sev}
+                className="font-mono text-[8px] font-bold tracking-wider px-1 py-0.5 rounded-sm"
+                style={{
+                  color,
+                  border: `1px solid color-mix(in srgb, ${color} 32%, transparent)`,
+                  background: `color-mix(in srgb, ${color} 7%, transparent)`,
+                }}
+              >
+                {n} {SEV_CONFIG[sev].label}
+              </span>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="font-mono text-[10px] mt-2" style={{ color: 'var(--safe)' }}>No known vulnerabilities</p>
+      )}
+
+      {upgradeTo && (
+        <p className="font-mono text-[10px] mt-2" style={{ color: 'var(--ink)' }}>
+          Upgrade to <span style={{ color: 'var(--safe)' }}>{node.name}@{upgradeTo}</span> or later
+          {unfixed > 0 && <span style={{ color: 'var(--muted)' }}> · {unfixed} with no listed fix</span>}
+        </p>
+      )}
+    </div>
+  );
+}
+
+export default function FindingsList({ result, scannerFilter, hasAiExplanation, onRequestAiFocus }: Props) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const selectedNodeId = useScanStore((s) => s.selectedNode);
+  const setSelectedNode = useScanStore((s) => s.setSelectedNode);
+  const focusRef = useRef<HTMLDivElement>(null);
+
+  const selectedNode = selectedNodeId
+    ? result.depchain?.nodes.find((n) => n.id === selectedNodeId && !n.isRoot) ?? null
+    : null;
+
+  let findings = extractFindings(result);
+  // A node picked in the map takes precedence over the scanner filter.
+  if (selectedNode) findings = findings.filter((f) => f.nodeId === selectedNode.id);
+  else if (scannerFilter) findings = findings.filter((f) => f.scanner === scannerFilter);
+
+  // Bring the node card into view when a node is picked in the map.
+  useEffect(() => {
+    if (selectedNodeId) focusRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [selectedNodeId]);
+
+  return (
+    <div className="px-5 py-4" ref={focusRef} style={{ scrollMarginTop: 8 }}>
+      {selectedNode && <NodeFocusCard node={selectedNode} result={result} onClear={() => setSelectedNode(null)} />}
+
       <div className="flex items-center gap-2 mb-3">
         <span className="font-mono text-[9px] tracking-[0.2em] uppercase" style={{ color: 'var(--muted)' }}>
           {findings.length} finding{findings.length !== 1 ? 's' : ''}
-          {scannerFilter ? ` · ${scannerFilter}` : ''}
+          {selectedNode ? ` · ${selectedNode.name}` : scannerFilter ? ` · ${scannerFilter}` : ''}
         </span>
         {findings.length > 0 && (
           <div className="h-px flex-1 rounded-full" style={{ background: 'linear-gradient(90deg, var(--border), transparent)' }} />
@@ -114,7 +221,9 @@ export default function FindingsList({ result, scannerFilter, hasAiExplanation, 
         <div className="text-center py-8">
           <div className="font-mono text-xl mb-2" style={{ color: 'var(--safe)' }}>ALL CLEAR</div>
           <p className="font-mono text-[10px]" style={{ color: 'var(--muted)' }}>
-            {scannerFilter ? `no findings from ${scannerFilter}` : '0 threats detected across 5 scanners'}
+            {selectedNode
+              ? `no findings for ${selectedNode.name}@${selectedNode.version}`
+              : scannerFilter ? `no findings from ${scannerFilter}` : '0 threats detected across 5 scanners'}
           </p>
         </div>
       ) : (
@@ -151,8 +260,13 @@ export default function FindingsList({ result, scannerFilter, hasAiExplanation, 
                       </span>
                     </div>
 
-                    {(f.filePath || f.entropy !== undefined) && (
+                    {(f.filePath || f.entropy !== undefined || f.advisoryId) && (
                       <div className="flex items-center gap-2 mt-1 flex-wrap">
+                        {f.advisoryId && (
+                          <span className="font-mono text-[9px]" style={{ color: 'var(--muted)' }}>
+                            {f.advisoryId}{f.fixedIn ? ` · fixed in ${f.fixedIn}` : ''}
+                          </span>
+                        )}
                         {f.filePath && (
                           <span className="font-mono text-[9px] px-1 py-0.5 rounded-sm" style={{ color: '#4dfaff', background: 'rgba(0,240,255,0.06)' }}>
                             {f.filePath}{f.line ? `:${f.line}` : ''}

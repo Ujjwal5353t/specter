@@ -2,6 +2,7 @@
 import { useMemo } from 'react';
 import { Sphere, Line, Text, Billboard } from '@react-three/drei';
 import type { ApiEndpoint } from '@/types';
+import { SCENE_COLORS } from '@/lib/depGraphLayout';
 
 interface Props { endpoints: ApiEndpoint[]; }
 
@@ -19,7 +20,7 @@ export default function ApiSpokes({ endpoints }: Props) {
 
         const isCritical = ep.severity === 'critical';
         const isHigh = ep.severity === 'high';
-        const color = isCritical ? '#FF2A6D' : isHigh ? '#FF7A1A' : ep.hasAuth ? '#22c55e' : '#F59E0B';
+        const color = isCritical ? SCENE_COLORS.critical : isHigh ? SCENE_COLORS.high : ep.hasAuth ? SCENE_COLORS.authed : SCENE_COLORS.unauthed;
 
         return (
           <group key={i}>
