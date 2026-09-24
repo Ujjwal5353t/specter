@@ -13,7 +13,8 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json().catch(() => ({}));
-  const { repoUrl } = body;
+  // force: user asked for a deep rescan, so skip the cache and run every scanner.
+  const { repoUrl, force } = body;
   if (!repoUrl) return NextResponse.json({ error: 'repoUrl required' }, { status: 400 });
 
   let owner: string, repo: string;
@@ -34,13 +35,15 @@ export async function POST(req: NextRequest) {
   // Normalize the URL to lowercase to prevent case-sensitive cache misses
   const normalizedUrl = `https://github.com/${owner}/${repo}`.toLowerCase();
 
-  // Check cache first (6-hour TTL)
-  const { data: cached } = await supabaseAdmin
-    .from('scan_cache')
-    .select('*')
-    .eq('repo_url', normalizedUrl)
-    .gt('expires_at', new Date().toISOString())
-    .single();
+  // Check cache first (6-hour TTL), unless a deep rescan was requested
+  const { data: cached } = force === true
+    ? { data: null }
+    : await supabaseAdmin
+      .from('scan_cache')
+      .select('*')
+      .eq('repo_url', normalizedUrl)
+      .gt('expires_at', new Date().toISOString())
+      .single();
 
   if (cached) {
     const { data: existingScan } = await supabaseAdmin

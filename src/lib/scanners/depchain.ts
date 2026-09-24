@@ -6,6 +6,7 @@ import { analyzeVersion, youngDependencySignal, typosquatTarget, type Packument 
 const REGISTRY_BASE = 'https://registry.npmjs.org';
 const DOWNLOADS_API = 'https://api.npmjs.org/downloads/point/last-week';
 const OSV_API = 'https://api.osv.dev/v1/querybatch';
+const OSV_VULN_API = 'https://api.osv.dev/v1/vulns';
 // A lookalike name with this much real usage is an established package, not a typosquat
 const TYPOSQUAT_MAX_WEEKLY_DOWNLOADS = 10_000;
 
@@ -162,10 +163,33 @@ async function flagTyposquats(nodes: DepNode[]): Promise<void> {
 
 const RISK_SEVERITIES = new Set<Severity>(['critical', 'high', 'medium']);
 
+/**
+ * Severity label for an OSV advisory. GitHub-reviewed advisories carry one in
+ * database_specific; OSV's CVSS entries are vector strings with no base score,
+ * so a numeric score is only used when present.
+ */
+function osvScore(v: OSVVuln): number {
+  const dbSev = v.database_specific?.severity?.toLowerCase();
+  if (dbSev) return dbSev === 'critical' ? 9.5 : dbSev === 'high' ? 7.5 : dbSev === 'moderate' || dbSev === 'medium' ? 5.0 : 2.0;
+  const numeric = v.severity?.find((s) => typeof s.score === 'number');
+  return numeric ? (numeric.score as number) : 5.0;
+}
+
+async function fetchOSVVuln(id: string): Promise<OSVVuln | null> {
+  try {
+    const res = await fetch(`${OSV_VULN_API}/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(8000) });
+    return res.ok ? ((await res.json()) as OSVVuln) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function queryOSV(packages: { name: string; version: string }[]): Promise<Map<string, CVE[]>> {
-  const cveMap = new Map<string, CVE[]>();
+  const idsByPkg = new Map<string, string[]>();
   const batchSize = 50;
 
+  // querybatch only returns { id, modified } per advisory — no summary or
+  // severity — so collect ids here and hydrate the full records below.
   for (let i = 0; i < packages.length; i += batchSize) {
     const batch = packages.slice(i, i + batchSize);
     try {
@@ -181,52 +205,41 @@ async function queryOSV(packages: { name: string; version: string }[]): Promise<
         signal: AbortSignal.timeout(15000),
       });
       const data = await res.json();
-      (data.results ?? []).forEach(
-        (result: { vulns?: OSVVuln[] }, idx: number) => {
-          const pkg = batch[idx];
-          const cves: CVE[] = (result.vulns ?? []).map((v) => {
-            // OSV returns severity as an array of objects with type and score
-            // CVSS score can be nested under severity[].score (numeric)
-            // or as a string in database_specific or ecosystem_specific
-            let score = 5.0;
-            if (v.severity && v.severity.length > 0) {
-              // Try numeric score first
-              const numericSev = v.severity.find((s) => typeof s.score === 'number');
-              if (numericSev) {
-                score = numericSev.score as number;
-              } else {
-                // CVSS string score — parse the base score from the vector
-                const stringSev = v.severity.find((s) => typeof s.score === 'string');
-                if (stringSev?.score) {
-                  const match = (stringSev.score as string).match(/\/(\d+\.\d+)$/);
-                  if (match) score = parseFloat(match[1]);
-                }
-              }
-            }
-            // database_specific fallback
-            if (score === 5.0 && v.database_specific?.severity) {
-              const dbSev = v.database_specific.severity.toLowerCase();
-              score = dbSev === 'critical' ? 9.5 : dbSev === 'high' ? 7.5 : dbSev === 'moderate' ? 5.0 : 2.0;
-            }
-
-            // Summary fallback chain
-            const summary =
-              (v.summary && v.summary.trim()) ||
-              (v.details && v.details.trim().split('\n')[0].substring(0, 120)) ||
-              v.id;
-
-            return {
-              id: v.id,
-              severity: severityFromScore(score),
-              score,
-              summary,
-              fixed_in: v.affected?.[0]?.ranges?.[0]?.events?.find((e) => e.fixed)?.fixed,
-            };
-          });
-          if (cves.length > 0) cveMap.set(`${pkg.name}@${pkg.version}`, cves);
-        }
-      );
+      (data.results ?? []).forEach((result: { vulns?: { id: string }[] }, idx: number) => {
+        const ids = (result.vulns ?? []).map((v) => v.id);
+        if (ids.length > 0) idsByPkg.set(`${batch[idx].name}@${batch[idx].version}`, ids);
+      });
     } catch {}
+  }
+
+  const uniqueIds = [...new Set([...idsByPkg.values()].flat())];
+  const vulns = new Map<string, OSVVuln>();
+  const concurrency = 10;
+  for (let i = 0; i < uniqueIds.length; i += concurrency) {
+    const chunk = uniqueIds.slice(i, i + concurrency);
+    const results = await Promise.all(chunk.map(fetchOSVVuln));
+    results.forEach((v, j) => { if (v) vulns.set(chunk[j], v); });
+  }
+
+  const cveMap = new Map<string, CVE[]>();
+  for (const [key, ids] of idsByPkg) {
+    const cves: CVE[] = ids.map((id) => {
+      // A failed hydration still reports the advisory, at the old default.
+      const v = vulns.get(id) ?? { id };
+      const score = osvScore(v);
+      const summary =
+        (v.summary && v.summary.trim()) ||
+        (v.details && v.details.trim().split('\n')[0].substring(0, 120)) ||
+        v.id;
+      return {
+        id: v.id,
+        severity: severityFromScore(score),
+        score,
+        summary,
+        fixed_in: v.affected?.[0]?.ranges?.[0]?.events?.find((e) => e.fixed)?.fixed,
+      };
+    });
+    cveMap.set(key, cves);
   }
   return cveMap;
 }

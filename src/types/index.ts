@@ -125,6 +125,6 @@ export interface AIExplanation {
     title: string;
     why_dangerous: string;
     exact_fix: string;
-    real_example: string;
+    attack_pattern: string;
   }[];
 }

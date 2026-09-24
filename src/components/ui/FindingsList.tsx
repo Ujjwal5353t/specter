@@ -23,7 +23,7 @@ interface Finding {
 
 const SEV_CONFIG: Record<Severity, { color: string; label: string }> = {
   critical: { color: '#FF2A6D', label: 'CRIT' },
-  high: { color: '#F59E0B', label: 'HIGH' },
+  high: { color: '#FF7A1A', label: 'HIGH' },
   medium: { color: '#eab308', label: 'MED' },
   low: { color: 'var(--ink)', label: 'LOW' },
   info: { color: 'var(--muted)', label: 'INFO' },
@@ -186,7 +186,7 @@ export default function FindingsList({ result, scannerFilter, hasAiExplanation, 
                           <p className="font-mono text-[10px] leading-relaxed" style={{ color: 'var(--ink)' }}>{f.detail}</p>
                           <CopyButton text={f.detail} />
                         </div>
-                        {hasAiExplanation && (f.severity === 'critical' || f.severity === 'high') && (
+                        {hasAiExplanation && f.severity !== 'low' && (
                           <button
                             onClick={(e) => { e.stopPropagation(); onRequestAiFocus?.(); }}
                             className="mt-2 font-mono text-[8px] uppercase tracking-wider cursor-pointer"

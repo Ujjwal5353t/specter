@@ -36,6 +36,11 @@ export default function AIPanel({ explanation }: Props) {
         </p>
       </div>
 
+      {/* Disclaimer — model output is unverified */}
+      <p className="font-mono text-[9px] tracking-wide mb-4 -mt-2" style={{ color: 'var(--muted)' }}>
+        AI-generated analysis. May contain errors; verify fixes independently before applying.
+      </p>
+
       {/* Individual items — analyst breakdown per finding */}
       <div className="space-y-3">
         {explanation.items.map((item, i) => (
@@ -72,7 +77,7 @@ export default function AIPanel({ explanation }: Props) {
               {[
                 { label: 'Why dangerous', value: item.why_dangerous, color: 'var(--ink)' },
                 { label: 'Fix', value: item.exact_fix, color: 'var(--white)' },
-                { label: 'Real example', value: item.real_example, color: 'var(--muted)', italic: true },
+                { label: 'Typical attack pattern', value: item.attack_pattern, color: 'var(--muted)', italic: true },
               ].map(({ label, value, color, italic }) => (
                 <div key={label}>
                   <span

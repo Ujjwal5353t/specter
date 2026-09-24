@@ -70,7 +70,7 @@ export function generateReport(r: ScanResult): void {
       if (data.section === 'body' && data.column.index === 1) {
         const sev = data.cell.raw as string;
         if (sev === 'CRITICAL') data.cell.styles.textColor = [255, 42, 109];
-        else if (sev === 'HIGH') data.cell.styles.textColor = [245, 158, 11];
+        else if (sev === 'HIGH') data.cell.styles.textColor = [255, 122, 26];
         else if (sev === 'MEDIUM') data.cell.styles.textColor = [234, 179, 8];
       }
     },
@@ -95,7 +95,13 @@ export function generateReport(r: ScanResult): void {
     const splitBrief = doc.splitTextToSize(r.aiExplanation.summary, 180);
     doc.text(splitBrief, 14, finalY + 8);
     
-    finalY += 12 + (splitBrief.length * 4);
+    finalY += 8 + (splitBrief.length * 4);
+
+    // Disclaimer — model output is unverified
+    doc.setFontSize(7);
+    doc.setTextColor(120, 120, 120);
+    doc.text('AI-generated analysis. May contain errors; verify fixes independently before applying.', 14, finalY);
+    finalY += 8;
 
     doc.setFontSize(10);
     doc.setTextColor(20, 20, 20);

@@ -19,18 +19,36 @@ interface SidebarProps {
   onFilterChange: (scanner: string | null) => void;
   onExportPdf: () => void;
   pdfLoading: boolean;
+  onRescan: () => void;
+  rescanning: boolean;
 }
 
 // Extracted to module scope (was previously declared inside ScanPage's body,
 // which recreated it — and remounted the whole sidebar, losing expanded-
 // finding state and replaying every entrance animation — on every unrelated
 // re-render, e.g. dragging the mobile sheet).
-function ScanSidebar({ scanResult, scannerFilter, onFilterChange, onExportPdf, pdfLoading }: SidebarProps) {
+function ScanSidebar({ scanResult, scannerFilter, onFilterChange, onExportPdf, pdfLoading, onRescan, rescanning }: SidebarProps) {
   return (
     <>
       <div className="scan-line-effect absolute inset-0 pointer-events-none z-10 overflow-hidden rounded-none" />
       <div className="px-5 md:pt-16 pt-2 pb-4 shrink-0 relative z-20" style={{ borderBottom: '1px solid var(--border)' }}>
-        <div className="absolute top-4 right-5 z-20">
+        <div className="absolute top-4 right-5 z-20 flex items-center gap-2">
+          <button
+            onClick={onRescan}
+            disabled={rescanning}
+            title="Ignore cached results and run every scanner again. Slower, but reflects the latest repo state and scanner fixes."
+            className="tactical-btn flex items-center gap-2 px-3 py-1.5 rounded-sm cursor-pointer disabled:opacity-60"
+            style={{ color: 'var(--ink)' }}
+          >
+            {rescanning ? (
+              <span className="w-2.5 h-2.5 rounded-full border-2 border-t-transparent animate-spin" style={{ borderColor: 'var(--accent-hi) transparent transparent transparent' }} />
+            ) : (
+              <svg width="11" height="11" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M10 6a4 4 0 1 1-1.2-2.85M10 1.5v2.5H7.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            )}
+            <span className="font-mono text-[10px] tracking-wider">{rescanning ? 'STARTING…' : 'DEEP RESCAN'}</span>
+          </button>
           <button
             onClick={onExportPdf}
             disabled={pdfLoading}
@@ -91,6 +109,7 @@ export default function ScanPage() {
   const [isMobileExpanded, setIsMobileExpanded] = useState(false);
   const [scannerFilter, setScannerFilter] = useState<string | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
+  const [rescanning, setRescanning] = useState(false);
 
   const handleBack = () => {
     reset();
@@ -156,6 +175,11 @@ export default function ScanPage() {
       fetch('/api/explain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ findings: allFindings }) })
         .then((r) => r.json())
         .then((data) => {
+          // Error responses ({ error }) have no items array and would crash AIPanel.
+          if (!data || typeof data.summary !== 'string' || !Array.isArray(data.items)) {
+            console.error('AI brief unavailable:', data?.error ?? data);
+            return;
+          }
           useScanStore.setState((s) => ({ scanResult: s.scanResult ? { ...s.scanResult, aiExplanation: data } : s.scanResult }));
         })
         .catch(() => {});
@@ -163,6 +187,30 @@ export default function ScanPage() {
     // `aiRef.current.fetched` guards against re-firing when `scanResult`
     // changes again after the AI explanation merges back in below.
   }, [scanResult]);
+
+  // Deep rescan: bypass the 6h cache so every scanner runs against the repo again.
+  const handleRescan = async () => {
+    if (!scanResult || rescanning) return;
+    setRescanning(true);
+    try {
+      const res = await fetch('/api/scan/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repoUrl: scanResult.repoUrl, force: true }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.scanId) throw new Error(data.error ?? 'Rescan failed to start');
+      // Let the AI brief and rehydration run again for the new scan.
+      aiRef.current.fetched = false;
+      hydrateRef.current = true;
+      startPolling(data.scanId);
+      router.push(`/scan/${data.scanId}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Rescan failed to start');
+    } finally {
+      setRescanning(false);
+    }
+  };
 
   const handleExportPdf = async () => {
     if (!scanResult) return;
@@ -233,6 +281,8 @@ export default function ScanPage() {
                 onFilterChange={setScannerFilter}
                 onExportPdf={handleExportPdf}
                 pdfLoading={pdfLoading}
+                onRescan={handleRescan}
+                rescanning={rescanning}
               />
             </motion.aside>
 
@@ -270,6 +320,8 @@ export default function ScanPage() {
                 onFilterChange={setScannerFilter}
                 onExportPdf={handleExportPdf}
                 pdfLoading={pdfLoading}
+                onRescan={handleRescan}
+                rescanning={rescanning}
               />
             </motion.aside>
           </>

@@ -19,7 +19,7 @@ export default function ApiSpokes({ endpoints }: Props) {
 
         const isCritical = ep.severity === 'critical';
         const isHigh = ep.severity === 'high';
-        const color = isCritical ? '#FF2A6D' : isHigh ? '#F59E0B' : ep.hasAuth ? '#22c55e' : '#F59E0B';
+        const color = isCritical ? '#FF2A6D' : isHigh ? '#FF7A1A' : ep.hasAuth ? '#22c55e' : '#F59E0B';
 
         return (
           <group key={i}>
