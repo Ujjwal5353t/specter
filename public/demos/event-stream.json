@@ -32,7 +32,7 @@
             "type": "young_dependency",
             "severity": "high",
             "title": "Newly added dependency was brand new",
-            "detail": "flatmap-stream was only 5 days old when event-stream@3.3.6 started depending on it."
+            "detail": "flatmap-stream had only just been published when event-stream@3.3.6 started depending on it."
           }
         ],
         "ecosystem": "npm"
