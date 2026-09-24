@@ -184,7 +184,10 @@ async function fetchOSVVuln(id: string): Promise<OSVVuln | null> {
   }
 }
 
-async function queryOSV(packages: { name: string; version: string }[]): Promise<Map<string, CVE[]>> {
+async function queryOSV(
+  packages: { name: string; version: string }[],
+  onProgress?: (detail: string) => void,
+): Promise<Map<string, CVE[]>> {
   const idsByPkg = new Map<string, string[]>();
   const batchSize = 50;
 
@@ -216,6 +219,7 @@ async function queryOSV(packages: { name: string; version: string }[]): Promise<
   const vulns = new Map<string, OSVVuln>();
   const concurrency = 10;
   for (let i = 0; i < uniqueIds.length; i += concurrency) {
+    onProgress?.(`fetching advisories ${i}/${uniqueIds.length}...`);
     const chunk = uniqueIds.slice(i, i + concurrency);
     const results = await Promise.all(chunk.map(fetchOSVVuln));
     results.forEach((v, j) => { if (v) vulns.set(chunk[j], v); });
@@ -263,8 +267,10 @@ async function findManifests(owner: string, repo: string): Promise<string[]> {
     .slice(0, MAX_MANIFESTS);
 }
 
-export async function runDepChain(owner: string, repo: string) {
+export async function runDepChain(owner: string, repo: string, onProgress?: (detail: string) => void) {
+  onProgress?.('locating package manifests...');
   const manifests = await findManifests(owner, repo);
+  if (manifests.length > 0) onProgress?.(`reading ${manifests.length} manifest${manifests.length === 1 ? '' : 's'}...`);
 
   // Collected as [name, range] pairs: the same package can appear in several
   // manifests with different ranges, and each resolves to its own node
@@ -308,15 +314,24 @@ export async function runDepChain(owner: string, repo: string) {
     ecosystem: 'npm',
   });
 
-  await Promise.allSettled(
-    directDeps
-      .slice(0, MAX_DIRECT_DEPS)
-      .map(([name, version]) => buildTree(ctx, name, version, 1, rootId))
-  );
+  // The tree resolves in parallel, so report its size on a clock instead of per package.
+  const reportTree = () => onProgress?.(`resolving dependency tree · ${nodes.size - 1} packages...`);
+  reportTree();
+  const treeTicker = onProgress ? setInterval(reportTree, 1000) : null;
+  try {
+    await Promise.allSettled(
+      directDeps
+        .slice(0, MAX_DIRECT_DEPS)
+        .map(([name, version]) => buildTree(ctx, name, version, 1, rootId))
+    );
+  } finally {
+    if (treeTicker) clearInterval(treeTicker);
+  }
 
   const depNodes = Array.from(nodes.values()).filter((n) => !n.isRoot);
+  onProgress?.(`checking ${depNodes.length} packages against OSV...`);
   const [cveMap] = await Promise.all([
-    queryOSV(depNodes.map((n) => ({ name: n.name, version: n.version }))),
+    queryOSV(depNodes.map((n) => ({ name: n.name, version: n.version })), onProgress),
     flagYoungDependencies(ctx),
     flagTyposquats(depNodes),
   ]);

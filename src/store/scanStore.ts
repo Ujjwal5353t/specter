@@ -1,5 +1,39 @@
 import { create } from 'zustand';
-import type { ScanResult } from '@/types';
+import type { ScanResult, ScannerProgress } from '@/types';
+
+/** Shape of GET /api/scan/[scanId]/status. */
+export interface ScanStatusResponse {
+  scan?: { status: string; repo_url: string; threat_score: number | null; error_message?: string | null; from_cache?: boolean };
+  cache?: {
+    dep_data?: ScanResult['depchain'];
+    secret_data?: ScanResult['ghostcommit'];
+    docker_data?: ScanResult['layerscan'];
+    api_data?: ScanResult['apibleed'];
+    env_data?: ScanResult['envtrace'];
+  } | null;
+  progress?: ScannerProgress[] | null;
+  scannedAt?: string | null;
+}
+
+/** Builds a completed ScanResult from a status response (polling and page rehydration share this). */
+export function resultFromStatus(scanId: string, data: ScanStatusResponse): ScanResult {
+  return {
+    scanId,
+    repoUrl: data.scan?.repo_url ?? '',
+    status: 'completed',
+    threatScore: data.scan?.threat_score ?? 0,
+    depchain: data.cache?.dep_data ?? undefined,
+    ghostcommit: data.cache?.secret_data ?? undefined,
+    layerscan: data.cache?.docker_data ?? undefined,
+    apibleed: data.cache?.api_data ?? undefined,
+    envtrace: data.cache?.env_data ?? undefined,
+    fromCache: data.scan?.from_cache ?? false,
+    scannedAt: data.scannedAt ?? undefined,
+  };
+}
+
+// Fast enough that the loader's per-scanner ticks feel live.
+const POLL_INTERVAL_MS = 1500;
 
 interface ScanStore {
   scanResult: ScanResult | null;
@@ -8,6 +42,8 @@ interface ScanStore {
   isPolling: boolean;
   isLoading: boolean;
   error: string | null;
+  /** Per-scanner state while a scan runs; null before /run reports any. */
+  progress: ScannerProgress[] | null;
   setScanResult: (result: ScanResult) => void;
   setSelectedNode: (id: string | null) => void;
   setSidebarOpen: (open: boolean) => void;
@@ -27,6 +63,7 @@ export const useScanStore = create<ScanStore>((set, get) => ({
   isPolling: false,
   isLoading: false,
   error: null,
+  progress: null,
 
   setScanResult: (result) => set({ scanResult: result, isLoading: false }),
   setSelectedNode: (id) => set({ selectedNode: id, sidebarOpen: id !== null }),
@@ -36,35 +73,23 @@ export const useScanStore = create<ScanStore>((set, get) => ({
 
   reset: () => {
     get().stopPolling();
-    set({ scanResult: null, selectedNode: null, sidebarOpen: false, error: null, isLoading: false });
+    set({ scanResult: null, selectedNode: null, sidebarOpen: false, error: null, isLoading: false, progress: null });
   },
 
   startPolling: (scanId: string) => {
     // Drop any previous scan's result/error so they can't bleed into this one
     get().stopPolling();
-    set({ isPolling: true, scanResult: null, error: null });
+    set({ isPolling: true, scanResult: null, error: null, progress: null });
     pollInterval = setInterval(async () => {
       try {
         const res = await fetch(`/api/scan/${scanId}/status`);
         if (!res.ok) throw new Error('Status check failed');
-        const data = await res.json();
+        const data: ScanStatusResponse = await res.json();
+        if (data.progress) set({ progress: data.progress });
 
         if (data.scan?.status === 'completed') {
           get().stopPolling();
-          set({
-            scanResult: {
-              scanId,
-              repoUrl: data.scan.repo_url,
-              status: 'completed',
-              threatScore: data.scan.threat_score ?? 0,
-              depchain: data.cache?.dep_data ?? undefined,
-              ghostcommit: data.cache?.secret_data ?? undefined,
-              layerscan: data.cache?.docker_data ?? undefined,
-              apibleed: data.cache?.api_data ?? undefined,
-              envtrace: data.cache?.env_data ?? undefined,
-            },
-            isLoading: false,
-          });
+          set({ scanResult: resultFromStatus(scanId, data), isLoading: false });
         } else if (data.scan?.status === 'failed') {
           get().stopPolling();
           set({ error: data.scan.error_message ?? 'Scan failed. The repo may be private or the URL is incorrect.', isLoading: false });
@@ -72,7 +97,7 @@ export const useScanStore = create<ScanStore>((set, get) => ({
       } catch {
         // keep polling on transient errors
       }
-    }, 3000);
+    }, POLL_INTERVAL_MS);
   },
 
   stopPolling: () => {

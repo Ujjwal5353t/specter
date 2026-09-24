@@ -8,6 +8,7 @@ import { runAPIBleed } from '@/lib/scanners/apibleed';
 import { runEnvTrace } from '@/lib/scanners/envtrace';
 import { appOrigin, type MonitorContext } from '@/lib/scanTrigger';
 import { formatAlert, sendTelegram, shouldAlert } from '@/lib/alerts';
+import { startProgress, trackScanner } from '@/lib/scanProgress';
 import type {
   DepChainResult, GhostCommitResult, LayerScanResult, APIBleedResult, EnvTraceResult, Severity,
 } from '@/types';
@@ -87,12 +88,33 @@ export async function POST(
   if (!access.ok) return failScan(access.reason, 422);
 
   try {
+    // Each scanner records running → done/failed in scan_progress as it
+    // settles, which /status serves to the live scan loader.
+    await startProgress(scanId, ['depchain', 'ghostcommit', 'layerscan', 'apibleed', 'envtrace']);
+    const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
     const settled = await Promise.allSettled([
-      runDepChain(owner, repo),
-      runGhostCommit(owner, repo),
-      runLayerScan(owner, repo),
-      runAPIBleed(owner, repo),
-      runEnvTrace(owner, repo),
+      trackScanner(scanId, 'depchain', (onProgress) => runDepChain(owner, repo, onProgress), (r) => ({
+        detail: r.nodes.length === 0
+          ? 'no package.json found'
+          : `${plural(r.nodes.length - 1, 'package')} · ${r.vulnCount} vulnerable`,
+        count: r.vulnCount,
+      })),
+      trackScanner(scanId, 'ghostcommit', () => runGhostCommit(owner, repo), (r) => ({
+        detail: `${plural(r.totalCommitsScanned, 'commit')} · ${plural(r.findings.length, 'secret')}`,
+        count: r.findings.length,
+      })),
+      trackScanner(scanId, 'layerscan', () => runLayerScan(owner, repo), (r) => ({
+        detail: r.baseImage === 'No Dockerfile found' ? 'no Dockerfile' : plural(r.findings.length, 'issue'),
+        count: r.findings.length,
+      })),
+      trackScanner(scanId, 'apibleed', () => runAPIBleed(owner, repo), (r) => ({
+        detail: `${plural(r.endpoints.length, 'endpoint')} · ${r.unsecuredCount} unsecured`,
+        count: r.unsecuredCount,
+      })),
+      trackScanner(scanId, 'envtrace', () => runEnvTrace(owner, repo), (r) => ({
+        detail: r.findings.length === 0 ? 'no exposures' : plural(r.findings.length, 'exposure'),
+        count: r.findings.length,
+      })),
     ]);
     const [dep, ghost, layer, api, env] = settled;
 

@@ -9,9 +9,16 @@ import SpecterLogo from '@/components/ui/SpecterLogo';
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useScanStore } from '@/store/scanStore';
+import { useScanStore, resultFromStatus, type ScanStatusResponse } from '@/store/scanStore';
 import { generateReport } from '@/lib/report';
 import type { ScanResult } from '@/types';
+
+function timeAgo(iso: string): string {
+  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  return `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
+}
 
 interface SidebarProps {
   scanResult: ScanResult;
@@ -67,6 +74,26 @@ function ScanSidebar({ scanResult, scannerFilter, onFilterChange, onExportPdf, p
         </div>
         <ThreatGauge result={scanResult} />
       </div>
+
+      {/* A cached result skipped the scanners entirely — say so, and point at the fresh-data path */}
+      {scanResult.fromCache && (
+        <div
+          className="px-5 py-2 shrink-0 relative z-20 flex items-center justify-between gap-3"
+          style={{ borderBottom: '1px solid var(--border)', background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}
+        >
+          <span className="font-mono text-[9px] tracking-wider uppercase" style={{ color: 'var(--ink)' }}>
+            Cached result{scanResult.scannedAt ? ` · scanned ${timeAgo(scanResult.scannedAt)}` : ''}
+          </span>
+          <button
+            onClick={onRescan}
+            disabled={rescanning}
+            className="font-mono text-[9px] tracking-wider uppercase cursor-pointer disabled:opacity-60 shrink-0"
+            style={{ color: 'var(--accent-hi)' }}
+          >
+            ▶ deep rescan for fresh data
+          </button>
+        </div>
+      )}
 
       <div className="px-5 py-3 shrink-0 relative z-20" style={{ borderBottom: '1px solid var(--border)' }}>
         <ScannerBadges result={scanResult} activeFilter={scannerFilter} onFilterChange={onFilterChange} />
@@ -129,19 +156,9 @@ export default function ScanPage() {
       try {
         const res = await fetch(`/api/scan/${scanId}/status`);
         if (!res.ok) return;
-        const data = await res.json();
+        const data: ScanStatusResponse = await res.json();
         if (data.scan?.status === 'completed') {
-          setScanResult({
-            scanId,
-            repoUrl: data.scan.repo_url,
-            status: 'completed',
-            threatScore: data.scan.threat_score ?? 0,
-            depchain: data.cache?.dep_data ?? undefined,
-            ghostcommit: data.cache?.secret_data ?? undefined,
-            layerscan: data.cache?.docker_data ?? undefined,
-            apibleed: data.cache?.api_data ?? undefined,
-            envtrace: data.cache?.env_data ?? undefined,
-          });
+          setScanResult(resultFromStatus(scanId, data));
         } else if (data.scan?.status === 'scanning' || data.scan?.status === 'pending') {
           startPolling(scanId);
         } else if (data.scan?.status === 'failed') {

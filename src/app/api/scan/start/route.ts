@@ -46,18 +46,26 @@ export async function POST(req: NextRequest) {
       .single();
 
   if (cached) {
-    const { data: existingScan } = await supabaseAdmin
+    const row = {
+      repo_url: normalizedUrl,
+      repo_owner: owner,
+      repo_name: repo,
+      status: 'completed',
+      threat_score: cached.threat_score,
+    };
+    let { data: existingScan, error } = await supabaseAdmin
       .from('scans')
-      .insert({
-        repo_url: normalizedUrl,
-        repo_owner: owner,
-        repo_name: repo,
-        status: 'completed',
-        threat_score: cached.threat_score,
-      })
+      .insert({ ...row, from_cache: true })
       .select()
       .single();
-    return NextResponse.json({ scanId: existingScan?.id });
+    // Databases not yet migrated lack from_cache; still serve the cached scan.
+    if (error) {
+      ({ data: existingScan, error } = await supabaseAdmin.from('scans').insert(row).select().single());
+    }
+    if (error || !existingScan) {
+      return NextResponse.json({ error: error?.message ?? 'Failed to create scan' }, { status: 500 });
+    }
+    return NextResponse.json({ scanId: existingScan.id });
   }
 
   const result = await createAndRunScan(owner, repo, appOrigin(req.nextUrl?.origin));

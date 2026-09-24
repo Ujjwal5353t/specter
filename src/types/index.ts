@@ -117,6 +117,22 @@ export interface ScanResult {
   apibleed?: APIBleedResult;
   envtrace?: EnvTraceResult;
   aiExplanation?: AIExplanation;
+  /** Served from the 6h scan cache rather than a fresh scanner run. */
+  fromCache?: boolean;
+  /** When the scanners actually ran (ISO string); differs from now for cached results. */
+  scannedAt?: string;
+}
+
+export type ScannerKey = 'depchain' | 'ghostcommit' | 'layerscan' | 'apibleed' | 'envtrace';
+
+/** One scanner's live state during a scan, from the scan_progress table. */
+export interface ScannerProgress {
+  scanner: ScannerKey;
+  status: 'running' | 'done' | 'failed';
+  detail: string | null;
+  finding_count: number | null;
+  started_at: string;
+  duration_ms: number | null;
 }
 
 export interface AIExplanation {
