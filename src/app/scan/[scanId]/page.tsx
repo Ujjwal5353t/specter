@@ -143,6 +143,9 @@ export default function ScanPage() {
       ...(scanResult.depchain?.nodes?.filter((n) => (n.cves?.length ?? 0) > 0).flatMap((n) =>
         n.cves.map((c) => ({ scanner: 'depchain', title: `${n.name}@${n.version}`, detail: c.summary, severity: c.severity }))
       ) ?? []),
+      ...(scanResult.depchain?.nodes?.flatMap((n) =>
+        (n.signals ?? []).filter((s) => s.severity !== 'low').map((s) => ({ scanner: 'depchain', title: `${s.title}: ${n.name}@${n.version}`, detail: s.detail, severity: s.severity }))
+      ) ?? []),
       ...(scanResult.ghostcommit?.findings?.map((f) => ({ scanner: 'ghostcommit', title: f.type, detail: f.file, severity: 'critical' as const })) ?? []),
       ...(scanResult.layerscan?.findings?.map((f) => ({ scanner: 'layerscan', title: f.issue.substring(0, 60), detail: f.fix, severity: f.severity })) ?? []),
       ...(scanResult.apibleed?.endpoints?.filter((e) => e.issues.length > 0).map((e) => ({ scanner: 'apibleed', title: `${e.method} ${e.path}`, detail: e.issues[0], severity: e.severity })) ?? []),

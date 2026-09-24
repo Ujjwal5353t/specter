@@ -8,11 +8,30 @@ export interface CVE {
   fixed_in?: string;
 }
 
+export type RiskSignalType =
+  | 'new_publisher'
+  | 'new_dependency'
+  | 'young_dependency'
+  | 'young_package'
+  | 'fresh_release'
+  | 'install_script'
+  | 'provenance_dropped'
+  | 'typosquat';
+
+/** A supply-chain yellow flag derived from npm registry metadata — not proof of malice. */
+export interface RiskSignal {
+  type: RiskSignalType;
+  severity: Severity;
+  title: string;
+  detail: string;
+}
+
 export interface DepNode {
   id: string;
   name: string;
   version: string;
   cves: CVE[];
+  signals?: RiskSignal[];
   ecosystem: string;
   isDirect?: boolean;
   isRoot?: boolean;
@@ -27,6 +46,8 @@ export interface DepChainResult {
   nodes: DepNode[];
   edges: DepEdge[];
   vulnCount: number;
+  /** Nodes carrying at least one medium-or-worse risk signal. Absent on older cached results. */
+  riskCount?: number;
 }
 
 export interface SecretFinding {

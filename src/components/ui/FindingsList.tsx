@@ -40,6 +40,11 @@ function extractFindings(r: ScanResult): Finding[] {
       severity: c.severity, title: `${n.name}@${n.version}`, detail: c.summary,
     })));
 
+  r.depchain?.nodes.forEach((n) => (n.signals ?? []).forEach((s) => out.push({
+    id: `risk-${n.id}-${s.type}`, scanner: 'depchain',
+    severity: s.severity, title: `${s.title} · ${n.name}@${n.version}`, detail: s.detail,
+  })));
+
   r.ghostcommit?.findings.forEach((f, i) => out.push({
     id: `ghost-${i}`, scanner: 'ghostcommit', severity: 'critical',
     title: f.type, detail: `Introduced in commit ${f.commit_sha.substring(0, 7)} — ${f.commit_message}`,

@@ -6,6 +6,8 @@ import { runGhostCommit } from '@/lib/scanners/ghostcommit';
 import { runLayerScan } from '@/lib/scanners/layerscan';
 import { runAPIBleed } from '@/lib/scanners/apibleed';
 import { runEnvTrace } from '@/lib/scanners/envtrace';
+import { appOrigin, type MonitorContext } from '@/lib/scanTrigger';
+import { formatAlert, sendTelegram, shouldAlert } from '@/lib/alerts';
 import type {
   DepChainResult, GhostCommitResult, LayerScanResult, APIBleedResult, EnvTraceResult, Severity,
 } from '@/types';
@@ -31,12 +33,13 @@ function calcThreatScore(r: ScanResults): number {
   const layerScore = layerFindings.reduce((acc, f) => acc + (sevWeight[f.severity] ?? 0), 0);
 
   const vulnDeps = r.depchain?.vulnCount ?? 0;
+  const riskyDeps = r.depchain?.riskCount ?? 0;
   const secrets = r.ghostcommit?.findings?.length ?? 0;
   const unsecuredApis = r.apibleed?.unsecuredCount ?? 0;
 
   return Math.min(
     Math.min(envScore + layerScore, 40) +
-    Math.min(vulnDeps * 8, 30) +
+    Math.min(vulnDeps * 8 + riskyDeps * 4, 30) +
     Math.min(secrets * 10, 20) +
     Math.min(unsecuredApis * 5, 10),
     100
@@ -53,6 +56,10 @@ export async function POST(
   }
 
   const { scanId } = await params;
+
+  // Set only when a webhook or cron triggered this scan; manual scans never alert
+  const body = await req.json().catch(() => ({}));
+  const monitor: MonitorContext | null = body?.monitor ?? null;
 
   const { data: scan } = await supabaseAdmin
     .from('scans')
@@ -124,6 +131,13 @@ export async function POST(
           package_name: n.name, metadata: { cve_id: c.id, score: c.score, fixed_in: c.fixed_in },
         }))
       ) ?? []),
+      ...(results.depchain?.nodes?.flatMap((n) =>
+        (n.signals ?? []).map((s) => ({
+          scan_id: scanId, scanner: 'depchain', severity: s.severity,
+          title: `${s.title}: ${n.name}@${n.version}`, detail: s.detail,
+          package_name: n.name, metadata: { signal: s.type },
+        }))
+      ) ?? []),
       ...(results.ghostcommit?.findings?.map((f) => ({
         scan_id: scanId, scanner: 'ghostcommit', severity: 'critical' as const,
         title: `${f.type} in commit`, detail: `${f.file}:${f.line} — entropy ${f.entropy.toFixed(2)}`,
@@ -150,6 +164,23 @@ export async function POST(
       await supabaseAdmin.from('findings').insert(allFindings);
     }
 
+    // Baseline for the alert diff: the latest completed scan of this repo
+    // before this one (cache replays carry the cached score, so they count too)
+    let previousScore: number | null = null;
+    if (monitor) {
+      const { data: prev } = await supabaseAdmin
+        .from('scans')
+        .select('threat_score')
+        .eq('repo_url', repoUrl)
+        .eq('status', 'completed')
+        .neq('id', scanId)
+        .not('threat_score', 'is', null)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      previousScore = prev?.threat_score ?? null;
+    }
+
     // Write the cache before flipping to completed, so a status poll never
     // sees a completed scan without its result data
     await supabaseAdmin.from('scan_cache').upsert({
@@ -168,7 +199,14 @@ export async function POST(
       .update({ status: 'completed', threat_score: threatScore, completed_at: new Date().toISOString() })
       .eq('id', scanId);
 
-    return NextResponse.json({ ok: true, threatScore });
+    if (monitor && shouldAlert(previousScore, threatScore)) {
+      await sendTelegram(formatAlert({
+        repoUrl, scanId, previousScore, newScore: threatScore,
+        findings: allFindings, monitor, origin: appOrigin(req.nextUrl?.origin),
+      }));
+    }
+
+    return NextResponse.json({ ok: true, threatScore, previousScore });
 
   } catch (err) {
     console.error('Run route error:', err);

@@ -34,6 +34,11 @@ export function generateReport(r: ScanResult): void {
       rows.push(['DepChain', c.severity.toUpperCase(), `${n.name}@${n.version}`, c.summary.substring(0, 65) + '...'])
     );
   });
+  r.depchain?.nodes.forEach((n) =>
+    (n.signals ?? []).forEach((s) =>
+      rows.push(['DepChain', s.severity.toUpperCase(), `${n.name}@${n.version}`, s.title])
+    )
+  );
   r.ghostcommit?.findings.forEach((f) =>
     rows.push(['GhostCommit', 'CRITICAL', f.type, `${f.file}:${f.line}`])
   );

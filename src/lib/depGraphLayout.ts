@@ -56,6 +56,11 @@ export interface NodeVisual {
   pulse: boolean;
 }
 
+/** True when a node carries a supply-chain risk signal worth surfacing (medium or worse). */
+export function hasRiskSignal(node: DepNode): boolean {
+  return node.signals?.some((s) => s.severity !== 'low' && s.severity !== 'info') ?? false;
+}
+
 /** Severity-driven sizing/coloring, shared by DepGraph and AttackPaths. */
 export function nodeVisual(node: DepNode): NodeVisual {
   const isCritical = node.cves?.some((c) => c.severity === 'critical') ?? false;
@@ -63,6 +68,7 @@ export function nodeVisual(node: DepNode): NodeVisual {
 
   if (isCritical) return { radius: 5.5, color: '#FF2A6D', emissiveIntensity: 1.1, pulse: true };
   if (isVuln) return { radius: 4, color: '#F59E0B', emissiveIntensity: 0.7, pulse: false };
+  if (hasRiskSignal(node)) return { radius: 3.5, color: '#eab308', emissiveIntensity: 0.6, pulse: false };
   return {
     radius: node.isDirect ? 2.6 : 1.8,
     color: node.isDirect ? '#00F0FF' : '#0e6fa8',

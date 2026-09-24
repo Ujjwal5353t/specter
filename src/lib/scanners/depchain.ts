@@ -1,9 +1,23 @@
-import type { DepNode, DepEdge, CVE, Severity } from '@/types';
-import { getFileContent } from '@/lib/github';
+import semver from 'semver';
+import type { DepNode, DepEdge, CVE, Severity, RiskSignal } from '@/types';
+import { getFileContent, getRepoTree } from '@/lib/github';
+import { analyzeVersion, youngDependencySignal, typosquatTarget, type Packument } from './deprisk';
 
 const REGISTRY_BASE = 'https://registry.npmjs.org';
+const DOWNLOADS_API = 'https://api.npmjs.org/downloads/point/last-week';
 const OSV_API = 'https://api.osv.dev/v1/querybatch';
-const npmCache = new Map<string, Record<string, string>>();
+// A lookalike name with this much real usage is an established package, not a typosquat
+const TYPOSQUAT_MAX_WEEKLY_DOWNLOADS = 10_000;
+
+/** Per-scan state, so registry data is never stale across scans. */
+interface ScanContext {
+  now: number;
+  packuments: Map<string, Promise<Packument | null>>;
+  nodes: Map<string, DepNode>;
+  edges: DepEdge[];
+  /** Publish time and newly added dependencies, per node id, for the young-dependency pass. */
+  releases: Map<string, { publishedAt: number | null; newDeps: string[] }>;
+}
 
 interface OSVSeverity { type?: string; score: number | string; }
 interface OSVEvent { introduced?: string; fixed?: string; last_affected?: string; limit?: string; }
@@ -29,55 +43,124 @@ function cleanVersion(v: string): string {
   return v.replace(/[\^~>=<]/g, '').split(' ')[0].split('||')[0].trim() || 'latest';
 }
 
-async function getNpmDeps(name: string, version: string): Promise<Record<string, string>> {
-  const key = `${name}@${cleanVersion(version)}`;
-  if (npmCache.has(key)) return npmCache.get(key)!;
+async function fetchPackument(name: string): Promise<Packument | null> {
   try {
-    const clean = cleanVersion(version);
-    const url = `${REGISTRY_BASE}/${encodeURIComponent(name)}/${clean}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
-    if (!res.ok) { npmCache.set(key, {}); return {}; }
-    const data = await res.json();
-    const deps = data.dependencies ?? {};
-    npmCache.set(key, deps);
-    return deps;
+    const res = await fetch(`${REGISTRY_BASE}/${encodeURIComponent(name)}`, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return null;
+    return (await res.json()) as Packument;
   } catch {
-    npmCache.set(key, {});
-    return {};
+    return null;
   }
 }
 
+function getPackument(ctx: ScanContext, name: string): Promise<Packument | null> {
+  let p = ctx.packuments.get(name);
+  if (!p) {
+    p = fetchPackument(name);
+    ctx.packuments.set(name, p);
+  }
+  return p;
+}
+
+/** The version a fresh `npm install` would pick for this range. */
+function resolveVersion(pk: Packument | null, range: string): string {
+  const versions = pk?.versions;
+  if (versions) {
+    const tags = pk['dist-tags'] ?? {};
+    const tagged = tags[range.trim() || 'latest'];
+    if (tagged && versions[tagged]) return tagged;
+    // npm prefers the `latest` tag whenever it satisfies the range
+    if (tags.latest && versions[tags.latest] && semver.satisfies(tags.latest, range)) return tags.latest;
+    const best = semver.maxSatisfying(Object.keys(versions), range);
+    if (best) return best;
+  }
+  return cleanVersion(range);
+}
+
 async function buildTree(
+  ctx: ScanContext,
   name: string,
-  version: string,
-  nodes: Map<string, DepNode>,
-  edges: DepEdge[],
+  range: string,
   depth: number,
   parentId: string | null
 ): Promise<void> {
   if (depth > 3) return;
-  const id = `${name}@${cleanVersion(version)}`;
-  if (nodes.has(id)) {
-    if (parentId) edges.push({ from: parentId, to: id });
+  const pk = await getPackument(ctx, name);
+  const version = resolveVersion(pk, range);
+  const id = `${name}@${version}`;
+  if (ctx.nodes.has(id)) {
+    if (parentId) ctx.edges.push({ from: parentId, to: id });
     return;
   }
-  nodes.set(id, {
+
+  const analysis = pk ? analyzeVersion(pk, version, ctx.now) : null;
+  ctx.nodes.set(id, {
     id,
     name,
-    version: cleanVersion(version),
+    version,
     cves: [],
+    signals: analysis?.signals ?? [],
     ecosystem: 'npm',
     isDirect: depth === 1,
   });
-  if (parentId) edges.push({ from: parentId, to: id });
+  if (analysis) ctx.releases.set(id, { publishedAt: analysis.publishedAt, newDeps: analysis.newDeps });
+  if (parentId) ctx.edges.push({ from: parentId, to: id });
 
-  const deps = await getNpmDeps(name, version);
+  // Explore newly added dependencies first so the cap below never hides them
+  const newDeps = new Set(analysis?.newDeps ?? []);
+  const deps = Object.entries(pk?.versions?.[version]?.dependencies ?? {})
+    .sort(([a], [b]) => Number(newDeps.has(b)) - Number(newDeps.has(a)));
   await Promise.allSettled(
-    Object.entries(deps)
-      .slice(0, 10)
-      .map(([n, v]) => buildTree(n, v, nodes, edges, depth + 1, id))
+    deps.slice(0, 10).map(([n, v]) => buildTree(ctx, n, v, depth + 1, id))
   );
 }
+
+/** Marks dependencies that were brand new when their parent's current release added them. */
+async function flagYoungDependencies(ctx: ScanContext): Promise<void> {
+  for (const edge of ctx.edges) {
+    const release = ctx.releases.get(edge.from);
+    const parent = ctx.nodes.get(edge.from);
+    const child = ctx.nodes.get(edge.to);
+    if (!release?.publishedAt || !parent || !child || !release.newDeps.includes(child.name)) continue;
+    const pk = await getPackument(ctx, child.name);
+    const signal = pk && youngDependencySignal(pk, parent.id, release.publishedAt);
+    if (!signal || child.signals?.some((s) => s.type === 'young_dependency')) continue;
+    // The stronger, parent-relative signal replaces the generic "brand-new package" one
+    child.signals = [...(child.signals ?? []).filter((s) => s.type !== 'young_package'), signal];
+  }
+}
+
+async function weeklyDownloads(name: string): Promise<number | null> {
+  try {
+    const res = await fetch(`${DOWNLOADS_API}/${name}`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return typeof data.downloads === 'number' ? data.downloads : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Direct dependencies only: that's where a mistyped name enters the tree. */
+async function flagTyposquats(nodes: DepNode[]): Promise<void> {
+  await Promise.allSettled(nodes.filter((n) => n.isDirect).map(async (node) => {
+    const target = typosquatTarget(node.name);
+    if (!target) return;
+    const downloads = await weeklyDownloads(node.name);
+    if (downloads !== null && downloads >= TYPOSQUAT_MAX_WEEKLY_DOWNLOADS) return;
+    const signal: RiskSignal = {
+      type: 'typosquat',
+      severity: 'high',
+      title: `Possible typosquat of "${target}"`,
+      detail: `"${node.name}" is one typo away from the popular package "${target}"` +
+        (downloads !== null ? ` but has only ${downloads.toLocaleString()} downloads a week.` : '.') +
+        ' Check this is the package you meant to install.',
+    };
+    node.signals = [...(node.signals ?? []), signal];
+  }));
+}
+
+const RISK_SEVERITIES = new Set<Severity>(['critical', 'high', 'medium']);
 
 async function queryOSV(packages: { name: string; version: string }[]): Promise<Map<string, CVE[]>> {
   const cveMap = new Map<string, CVE[]>();
@@ -148,16 +231,59 @@ async function queryOSV(packages: { name: string; version: string }[]): Promise<
   return cveMap;
 }
 
+const MAX_MANIFESTS = 10;
+const MAX_MANIFEST_DEPTH = 3;
+const MAX_DIRECT_DEPS = 25;
+
+/**
+ * Every package.json in the repo, not just the root one, so split layouts
+ * (backend/ + frontend/) and monorepos get scanned. Shallowest first.
+ */
+async function findManifests(owner: string, repo: string): Promise<string[]> {
+  const tree = await getRepoTree(owner, repo);
+  return tree
+    .map((f) => f.path)
+    .filter((p) => (p === 'package.json' || p.endsWith('/package.json'))
+      && !p.split('/').includes('node_modules')
+      && p.split('/').length <= MAX_MANIFEST_DEPTH)
+    .sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b))
+    .slice(0, MAX_MANIFESTS);
+}
+
 export async function runDepChain(owner: string, repo: string) {
-  const pkgContent = await getFileContent(owner, repo, 'package.json');
-  if (!pkgContent) return { nodes: [], edges: [], vulnCount: 0 };
+  const manifests = await findManifests(owner, repo);
 
-  let parsed: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> } = {};
-  try { parsed = JSON.parse(pkgContent); } catch { return { nodes: [], edges: [], vulnCount: 0 }; }
+  // Collected as [name, range] pairs: the same package can appear in several
+  // manifests with different ranges, and each resolves to its own node
+  const prodDeps: [string, string][] = [];
+  const devDeps: [string, string][] = [];
+  for (const path of manifests) {
+    const content = await getFileContent(owner, repo, path);
+    if (!content) continue;
+    let parsed: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+    try { parsed = JSON.parse(content); } catch { continue; }
+    prodDeps.push(...Object.entries(parsed.dependencies ?? {}));
+    devDeps.push(...Object.entries(parsed.devDependencies ?? {}));
+  }
 
-  const allDeps = { ...parsed.dependencies, ...parsed.devDependencies };
-  const nodes = new Map<string, DepNode>();
-  const edges: DepEdge[] = [];
+  // Production deps fill the cap first: they're what actually ships
+  const seen = new Set<string>();
+  const directDeps = [...prodDeps, ...devDeps].filter(([name, range]) => {
+    const key = `${name}@${range}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (directDeps.length === 0) return { nodes: [], edges: [], vulnCount: 0 };
+
+  const ctx: ScanContext = {
+    now: Date.now(),
+    packuments: new Map(),
+    nodes: new Map(),
+    edges: [],
+    releases: new Map(),
+  };
+  const { nodes, edges } = ctx;
   const rootId = `${owner}/${repo}@root`;
 
   nodes.set(rootId, {
@@ -170,23 +296,26 @@ export async function runDepChain(owner: string, repo: string) {
   });
 
   await Promise.allSettled(
-    Object.entries(allDeps)
-      .slice(0, 25)
-      .map(([name, version]) => buildTree(name, version, nodes, edges, 1, rootId))
+    directDeps
+      .slice(0, MAX_DIRECT_DEPS)
+      .map(([name, version]) => buildTree(ctx, name, version, 1, rootId))
   );
 
-  const pkgList = Array.from(nodes.values())
-    .filter((n) => !n.isRoot)
-    .map((n) => ({ name: n.name, version: n.version }));
-
-  const cveMap = await queryOSV(pkgList);
+  const depNodes = Array.from(nodes.values()).filter((n) => !n.isRoot);
+  const [cveMap] = await Promise.all([
+    queryOSV(depNodes.map((n) => ({ name: n.name, version: n.version }))),
+    flagYoungDependencies(ctx),
+    flagTyposquats(depNodes),
+  ]);
 
   let vulnCount = 0;
+  let riskCount = 0;
   nodes.forEach((node) => {
     const cves = cveMap.get(`${node.name}@${node.version}`) ?? [];
     node.cves = cves;
     if (cves.length > 0) vulnCount++;
+    if (node.signals?.some((s) => RISK_SEVERITIES.has(s.severity))) riskCount++;
   });
 
-  return { nodes: Array.from(nodes.values()), edges, vulnCount };
+  return { nodes: Array.from(nodes.values()), edges, vulnCount, riskCount };
 }

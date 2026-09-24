@@ -5,7 +5,7 @@ import { Sphere, Line, Text, Billboard } from '@react-three/drei';
 import * as THREE from 'three';
 import type { DepNode, DepEdge } from '@/types';
 import { useScanStore } from '@/store/scanStore';
-import { computeNodePositions, nodeVisual } from '@/lib/depGraphLayout';
+import { computeNodePositions, nodeVisual, hasRiskSignal } from '@/lib/depGraphLayout';
 
 interface Props { nodes: DepNode[]; edges: DepEdge[]; filter?: 'all' | 'vulnerable'; }
 
@@ -58,7 +58,7 @@ function DepSphere({
 
       {visual.pulse && <pointLight color={visual.color} intensity={2.2} distance={22} />}
 
-      {(node.cves?.length ?? 0) > 0 && (
+      {((node.cves?.length ?? 0) > 0 || hasRiskSignal(node)) && (
         <Sphere args={[visual.radius + 2.5, 12, 12]}>
           <meshBasicMaterial color={visual.color} transparent opacity={0.1} wireframe />
         </Sphere>
@@ -90,7 +90,7 @@ export default function DepGraph({ nodes, edges, filter = 'all' }: Props) {
   const positions = useMemo(() => computeNodePositions(nodes), [nodes]);
 
   const visibleNodes = useMemo(
-    () => nodes.filter((n) => !n.isRoot && (filter === 'all' || (n.cves?.length ?? 0) > 0)),
+    () => nodes.filter((n) => !n.isRoot && (filter === 'all' || (n.cves?.length ?? 0) > 0 || hasRiskSignal(n))),
     [nodes, filter]
   );
   const visibleIds = useMemo(() => new Set(visibleNodes.map((n) => n.id)), [visibleNodes]);
