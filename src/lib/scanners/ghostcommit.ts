@@ -1,4 +1,4 @@
-import { octokit } from '@/lib/github';
+import { githubErrorStatus, octokit } from '@/lib/github';
 import type { SecretFinding } from '@/types';
 
 function shannon(str: string): number {
@@ -159,7 +159,11 @@ export async function runGhostCommit(owner: string, repo: string) {
         }
       }
       await new Promise((r) => setTimeout(r, 120)); // rate limit guard
-    } catch {}
+    } catch (err) {
+      // A GitHub API error means commits went unscanned; surface it rather
+      // than report fewer secrets than actually exist
+      if (githubErrorStatus(err) !== undefined) throw err;
+    }
   }
 
   const deduped = findings.filter(

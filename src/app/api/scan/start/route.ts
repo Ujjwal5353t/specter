@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
-import { parseRepoUrl } from '@/lib/github';
+import { checkRepoAccess, parseRepoUrl } from '@/lib/github';
 import { rateLimit } from '@/lib/rateLimit';
 
 export const maxDuration = 60;
@@ -21,6 +21,13 @@ export async function POST(req: NextRequest) {
   } catch (e) {
     const message = e instanceof Error ? e.message : 'Invalid GitHub URL';
     return NextResponse.json({ error: message }, { status: 400 });
+  }
+
+  // Reject private/missing repos up front, before the cache can serve a stale
+  // result for them. /run repeats this check in case access changes mid-flight.
+  const access = await checkRepoAccess(owner, repo);
+  if (!access.ok) {
+    return NextResponse.json({ error: access.reason }, { status: 422 });
   }
 
   // Normalize the URL to lowercase to prevent case-sensitive cache misses
