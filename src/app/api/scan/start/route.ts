@@ -2,12 +2,19 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
 import { checkRepoAccess, parseRepoUrl } from '@/lib/github';
 import { rateLimit } from '@/lib/rateLimit';
-import { appOrigin, createAndRunScan } from '@/lib/scanTrigger';
+import { appOrigin, createAndRunScan, getInternalSecret } from '@/lib/scanTrigger';
 
 export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
-  const ip = req.headers.get('x-forwarded-for')?.split(',')[0] ?? 'unknown';
+  // Fail closed before touching the DB or the rate limiter if prod has no secret
+  if (!getInternalSecret()) {
+    console.error('INTERNAL_SECRET is not set in production');
+    return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
+  }
+
+  // Leftmost entry is the original client; the rest are proxies
+  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
   if (!rateLimit(ip)) {
     return NextResponse.json({ error: 'Rate limit: 5 scans per hour' }, { status: 429 });
   }

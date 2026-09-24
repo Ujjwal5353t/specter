@@ -13,6 +13,30 @@ function verifySignature(rawBody: string, header: string | null, secret: string)
   return expected.length === received.length && timingSafeEqual(expected, received);
 }
 
+// Per-instance dedupe state (best-effort on serverless, like rateLimit).
+// Maps hold the time each key was seen; swept on use and hard-capped.
+const DELIVERY_TTL_MS = 60 * 60 * 1000;
+const RECENT_SCAN_MS = 60 * 1000;
+const MAX_TRACKED = 5000;
+const deliveries = new Map<string, number>();
+const recentScans = new Map<string, number>();
+
+// Insertion order is time order, so expired keys are always at the front
+function sweep(map: Map<string, number>, now: number, ttlMs: number) {
+  for (const [key, seenAt] of map) {
+    if (now - seenAt < ttlMs) break;
+    map.delete(key);
+  }
+}
+
+function remember(map: Map<string, number>, key: string, now: number) {
+  if (map.size >= MAX_TRACKED) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(key, now);
+}
+
 interface PushPayload {
   ref?: string;
   after?: string;
@@ -63,6 +87,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, ignored: `push to ${payload.ref}, not default branch` });
   }
 
+  // Redelivery or replay of a signed payload must not start a second scan
+  const now = Date.now();
+  const deliveryId = req.headers.get('x-github-delivery');
+  if (deliveryId) {
+    sweep(deliveries, now, DELIVERY_TTL_MS);
+    if (deliveries.has(deliveryId)) return NextResponse.json({ ok: true, skipped: 'duplicate delivery' });
+    remember(deliveries, deliveryId, now);
+  }
+
+  // A push storm (many pushes in a row) only needs one scan per window
+  const repoKey = `${owner}/${repo}`.toLowerCase();
+  sweep(recentScans, now, RECENT_SCAN_MS);
+  if (recentScans.has(repoKey)) return NextResponse.json({ ok: true, skipped: 'recent' });
+  remember(recentScans, repoKey, now);
+
   // Deliberately skips the 6h scan_cache: a push is exactly when the cache is stale
   const result = await createAndRunScan(owner, repo, appOrigin(req.nextUrl?.origin), {
     source: 'github-push',
@@ -71,7 +110,12 @@ export async function POST(req: NextRequest) {
     pusher: payload.pusher?.name,
     ref: payload.ref,
   });
-  if ('error' in result) return NextResponse.json({ error: result.error }, { status: 500 });
+  if ('error' in result) {
+    // Nothing started, so let GitHub's redelivery (or the next push) through
+    if (deliveryId) deliveries.delete(deliveryId);
+    recentScans.delete(repoKey);
+    return NextResponse.json({ error: result.error }, { status: 500 });
+  }
 
   return NextResponse.json({ ok: true, scanId: result.scanId }, { status: 202 });
 }

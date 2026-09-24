@@ -3,12 +3,19 @@
 //
 //   node scripts/simulate-push.mjs owner/repo [http://localhost:3000]
 //
-// Needs the dev server running and GITHUB_WEBHOOK_SECRET in .env.
+// Needs the dev server running and GITHUB_WEBHOOK_SECRET in .env.local (or .env).
 import { createHmac } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+
+// Same precedence as Next.js: .env.local wins over .env
+const envFile = ['.env.local', '.env'].find((f) => existsSync(f));
+if (!envFile) {
+  console.error('No .env.local or .env found in the current directory. Copy .env.sample to .env.local and set GITHUB_WEBHOOK_SECRET.');
+  process.exit(1);
+}
 
 const env = {};
-for (const line of readFileSync('.env', 'utf8').split(/\r?\n/)) {
+for (const line of readFileSync(envFile, 'utf8').split(/\r?\n/)) {
   const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*"?([^"]*)"?\s*$/);
   if (m) env[m[1]] = m[2];
 }
@@ -19,7 +26,7 @@ if (!fullName?.includes('/')) {
   process.exit(1);
 }
 if (!env.GITHUB_WEBHOOK_SECRET) {
-  console.error('GITHUB_WEBHOOK_SECRET is not set in .env');
+  console.error(`GITHUB_WEBHOOK_SECRET is not set in ${envFile}`);
   process.exit(1);
 }
 
