@@ -6,8 +6,8 @@ import { runGhostCommit } from '@/lib/scanners/ghostcommit';
 import { runLayerScan } from '@/lib/scanners/layerscan';
 import { runAPIBleed } from '@/lib/scanners/apibleed';
 import { runEnvTrace } from '@/lib/scanners/envtrace';
-import { appOrigin, type MonitorContext } from '@/lib/scanTrigger';
-import { formatAlert, sendTelegram, shouldAlert } from '@/lib/alerts';
+import { appOrigin, getInternalSecret, safeEqual, type MonitorContext } from '@/lib/scanTrigger';
+import { formatAlert, formatFailureAlert, sendTelegram, shouldAlert } from '@/lib/alerts';
 import { startProgress, trackScanner } from '@/lib/scanProgress';
 import type {
   DepChainResult, GhostCommitResult, LayerScanResult, APIBleedResult, EnvTraceResult, Severity,
@@ -51,8 +51,12 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ scanId: string }> }
 ) {
-  const secret = req.headers.get('x-internal-secret');
-  if (secret !== (process.env.INTERNAL_SECRET ?? 'specter-internal')) {
+  const expected = getInternalSecret();
+  if (!expected) {
+    console.error('INTERNAL_SECRET is not set in production');
+    return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
+  }
+  if (!safeEqual(req.headers.get('x-internal-secret'), expected)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
@@ -81,6 +85,12 @@ export async function POST(
       .from('scans')
       .update({ status: 'failed', error_message: reason })
       .eq('id', scanId);
+    // Only webhook/cron scans alert; a silent failure would leave a repo unmonitored
+    if (monitor) {
+      await sendTelegram(formatFailureAlert({
+        repoUrl, scanId, reason, monitor, origin: appOrigin(req.nextUrl?.origin),
+      }));
+    }
     return NextResponse.json({ error: reason }, { status });
   };
 

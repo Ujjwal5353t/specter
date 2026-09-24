@@ -58,6 +58,28 @@ export function formatAlert(c: ScoreChange): string {
   return lines.join('\n');
 }
 
+/** Tells the operator a monitored scan died, so a repo doesn't go quietly unwatched. */
+export function formatFailureAlert(c: {
+  repoUrl: string;
+  scanId: string;
+  reason: string;
+  monitor: MonitorContext;
+  origin: string;
+}): string {
+  const repo = c.repoUrl.replace('https://github.com/', '');
+  const lines = [`⚠️ SPECTER: scan failed on ${repo}`, c.reason.slice(0, 200)];
+
+  const m = c.monitor;
+  if (m.source === 'github-push' && m.commitSha) {
+    lines.push('', `Triggered by push ${m.commitSha.slice(0, 7)}${m.pusher ? ` by ${m.pusher}` : ''}`);
+  } else if (m.source === 'cron') {
+    lines.push('', 'Triggered by scheduled rescan');
+  }
+
+  lines.push('', `${c.origin}/scan/${c.scanId}`);
+  return lines.join('\n');
+}
+
 /** Sends a plain-text Telegram message. No-op if the bot isn't configured. */
 export async function sendTelegram(text: string): Promise<boolean> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
