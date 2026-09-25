@@ -17,7 +17,7 @@ export interface NpmVersionDoc {
   dependencies?: Record<string, string>;
   scripts?: Record<string, string>;
   _npmUser?: { name?: string; email?: string };
-  dist?: { attestations?: unknown };
+  dist?: { attestations?: unknown; integrity?: string; shasum?: string };
 }
 
 /** The full registry document for a package (registry.npmjs.org/<name>). */
@@ -217,6 +217,11 @@ export function youngDependencySignal(
   if (parent) {
     const scope = scopeOf(dep.name);
     if (scope && scope === scopeOf(parent.name)) return null;
+    // A package publishing its own platform/native binaries under a scope
+    // named after itself (esbuild -> @esbuild/*, typescript ->
+    // @typescript/typescript-linux-x64, ...) is the same "ships together"
+    // case as a shared scope, just spelled the other way around.
+    if (scope && scope.slice(1) === parent.name) return null;
     const depPublisher = firstPublisher(dep);
     if (depPublisher && depPublisher === parent.publisher) return null;
   }

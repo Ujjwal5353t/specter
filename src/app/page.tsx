@@ -54,6 +54,12 @@ const GUTTER = 'clamp(24px, 5.5vw, 104px)';
 // Hero column width (excluding gutter) — ~620px on a 1440 viewport.
 const HERO_W = 'clamp(420px, 43vw, 700px)';
 
+// How far the globe's vertical centre sits below the main band's own centre —
+// a gentle nudge so it still reads as sitting just above/behind the engine
+// row, now that its size (see EcosystemField's NATURAL_SPAN) keeps the whole
+// sphere inside its own box instead of being clipped by it.
+const GLOBE_SHIFT = 'clamp(16px, 2.8vh, 32px)';
+
 // Quick-fill suggestions — decorative UI copy, not application data.
 const TRY_REPOS = ['vanshikaaz/specter', 'expressjs/express', 'vercel/next.js'];
 
@@ -275,7 +281,11 @@ export default function Home() {
           />
         )}
 
-        <div className="absolute" style={{ top: 0, bottom: 0, left: '28.5%', right: 0, zIndex: 0 }}>
+        {/* Shifted down by the same amount top and bottom, so the box keeps
+            its height (globe size/scale unchanged) and only its vertical
+            centre moves — the lower arc bleeds behind the engine row below,
+            which paints over it (see z-index on #engines). */}
+        <div className="absolute" style={{ top: GLOBE_SHIFT, bottom: `calc(-1 * ${GLOBE_SHIFT})`, left: '19%', right: 0, zIndex: 0 }}>
           <EcosystemField />
         </div>
 
@@ -455,11 +465,16 @@ export default function Home() {
       {/* ── Engines ──────────────────────────────────────────────── */}
       <section
         id="engines"
-        className="relative z-10 shrink-0"
+        className="relative z-20 shrink-0"
         style={{
           marginLeft: GUTTER, marginRight: GUTTER, marginBottom: 'clamp(12px, 2.4vh, 28px)',
           border: `1px solid ${C.lineSoft}`,
-          background: 'rgba(4,8,14,.72)',
+          // Translucent on purpose: the globe should read clearly through this
+          // row, not disappear behind it. The blur keeps its fine node/edge
+          // detail from competing with the card text's own solid, high-
+          // contrast colour, which is what actually keeps the text readable.
+          background: 'rgba(4,8,14,.58)',
+          backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
           display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
         }}
       >

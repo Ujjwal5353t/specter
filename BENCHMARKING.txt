@@ -126,3 +126,51 @@ The benchmark also confirmed the entropy-threshold concern from section
 when its variable name matches a pattern (e.g. AUTH_TOKEN=).
 
 Re-run before quoting numbers: DepChain's depend on OSV.dev's live data.
+
+------------------------------------------------------------------
+5. PACKAGE VERDICT ENGINE (issue #26; npm run eval-verdicts, 2026-09-26;
+   details in scripts/eval-verdicts-results.md)
+------------------------------------------------------------------
+Separate from the repo scanners above: analyzePackage(name, version)
+(#27/#28) gives a pre-install allow/warn/block verdict for one npm
+version, from registry metadata + OSV — before anything is cloned or
+installed.
+
+  Known-malicious: 19 versions, discovered live from OSV.dev (a MAL- id
+  or a CWE-506 "Embedded Malicious Code" advisory) across 16 well-known
+  attack names (event-stream, node-ipc, ua-parser-js, coa, rc,
+  eslint-scope, flatmap-stream — 9 of the 16 candidate names had no OSV
+  malicious-package advisory at run time and contributed no cases).
+  19/19 caught, all blocked outright.
+
+  Popular packages: 208 packages from the app's own typosquat list
+  (src/lib/scanners/popularPackages.ts), each at its current `latest`
+  release. 3/208 (1.4%) flagged, 0 wrongly blocked. The 3 are angular
+  1.8.3, hapi 18.1.0 and apollo-server 3.13.0 — each `latest` on an
+  unmaintained major with a real disclosed high-severity CVE, so these
+  read as correct warns on an EOL release rather than false alarms;
+  still worth a second look before the next tier tightens the bar.
+
+Talking point:
+
+  "The verdict engine caught 19 of 19 known-malicious npm versions
+   discovered live from OSV, all as an outright block, with a 1.4%
+   flag rate on 208 popular packages at their current release — and
+   every one of those 3 flags was a real disclosed CVE on an EOL
+   major, not a wrong call."
+
+Bug found and fixed by this run: youngDependencySignal's monorepo-
+sibling exemption only recognised a *shared* npm scope. It did not
+recognise a package whose own scope is named after an UNSCOPED parent
+(typescript -> @typescript/typescript-linux-x64, the native-binary
+release pattern esbuild/swc/rollup also use), so typescript@7.0.2's own
+~20 platform binaries were each flagged "young dependency" and the
+package came back block. Fixed in deprisk.ts; re-verified against the
+DepChain benchmark in section 4 with no regression.
+
+Only the "metadata" tier (#27+#28) exists yet. Re-run after the diff,
+LLM and sandbox tiers (#39/#43/#45) land to see each one's effect.
+
+Re-run before quoting numbers: both sets are discovered/fetched live
+(OSV's malicious-package feed, and each popular package's current
+`latest`), so exact versions and counts can shift between runs.
