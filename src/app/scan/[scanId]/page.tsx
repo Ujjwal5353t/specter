@@ -139,6 +139,9 @@ export default function ScanPage() {
   const [rescanning, setRescanning] = useState(false);
 
   const handleBack = () => {
+    // Otherwise the rehydrate effect sees the emptied store before this page
+    // unmounts and refetches the old scan into the global 3D scene.
+    hydrateRef.current = true;
     reset();
     router.push('/');
   };
@@ -149,8 +152,9 @@ export default function ScanPage() {
   useEffect(() => {
     const scanId = params.scanId as string;
     if (!scanId || hydrateRef.current) return;
-    if (scanResult || isPolling || isLoading) return;
     hydrateRef.current = true;
+    // Already loaded in this session (via /start or a demo): nothing to rehydrate.
+    if (scanResult || isPolling || isLoading) return;
 
     (async () => {
       try {
