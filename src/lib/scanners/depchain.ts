@@ -343,13 +343,26 @@ export async function runDepChain(owner: string, repo: string, onProgress?: (det
   const manifests = await findManifests(owner, repo);
   if (manifests.length > 0) onProgress?.(`reading ${manifests.length} manifest${manifests.length === 1 ? '' : 's'}...`);
 
+  const contents: string[] = [];
+  for (const path of manifests) {
+    const content = await getFileContent(owner, repo, path);
+    if (content) contents.push(content);
+  }
+  return analyzeManifests(`${owner}/${repo}`, contents, onProgress);
+}
+
+/**
+ * The DepChain pipeline from raw package.json contents onward: registry
+ * resolution, tree building, OSV lookup and risk signals. Split out of
+ * runDepChain so the benchmark (scripts/benchmark) exercises exactly the code
+ * a real scan runs, without needing a GitHub repo.
+ */
+export async function analyzeManifests(rootName: string, manifests: string[], onProgress?: (detail: string) => void) {
   // Collected as [name, range] pairs: the same package can appear in several
   // manifests with different ranges, and each resolves to its own node
   const prodDeps: [string, string][] = [];
   const devDeps: [string, string][] = [];
-  for (const path of manifests) {
-    const content = await getFileContent(owner, repo, path);
-    if (!content) continue;
+  for (const content of manifests) {
     let parsed: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
     try { parsed = JSON.parse(content); } catch { continue; }
     prodDeps.push(...Object.entries(parsed.dependencies ?? {}));
@@ -377,11 +390,11 @@ export async function runDepChain(owner: string, repo: string, onProgress?: (det
     releases: new Map(),
   };
   const { nodes, edges } = ctx;
-  const rootId = `${owner}/${repo}@root`;
+  const rootId = `${rootName}@root`;
 
   nodes.set(rootId, {
     id: rootId,
-    name: `${owner}/${repo}`,
+    name: rootName,
     version: 'root',
     isRoot: true,
     cves: [],

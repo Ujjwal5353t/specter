@@ -56,7 +56,7 @@ function scanLine(
   line: string,
   lineNum: number,
   file: string,
-  commit: { sha: string; message: string; author: string; date: string }
+  commit: CommitMeta
 ): SecretFinding[] {
   const findings: SecretFinding[] = [];
   if (line.startsWith('-')) return findings;
@@ -108,6 +108,65 @@ function scanLine(
   return findings;
 }
 
+export interface CommitMeta { sha: string; message: string; author: string; date: string }
+
+/**
+ * Scans one commit's changed files (as GitHub returns them: filename + unified
+ * diff patch) for secrets. Exported so the benchmark (scripts/benchmark) runs
+ * the same detection path as a real scan against a labeled corpus.
+ */
+export async function scanCommitFiles(
+  files: { filename: string; patch?: string }[],
+  commit: CommitMeta
+): Promise<SecretFinding[]> {
+  const findings: SecretFinding[] = [];
+  for (const file of files) {
+    // Skip files with massive patches — real secrets are never buried
+    // 60KB deep in a single patch, and this bounds the worst-case
+    // synchronous regex/entropy work done per file (this is what let a
+    // single scan peg the Node event loop for minutes and stall every
+    // other in-flight request).
+    if (!file.patch || file.patch.length > 60000) continue;
+    if (shouldSkipFile(file.filename)) continue;
+    if (file.filename.includes('node_modules') || file.filename.includes('.min.')) continue;
+
+    // Belt-and-suspenders alongside the byte cap above: even a <60KB
+    // patch could still be thousands of short lines, so also cap how
+    // many lines of any one file get scanned.
+    const lines = file.patch.split('\n').slice(0, 1000);
+    let lineNum = 0;
+    let processedLines = 0;
+    for (const line of lines) {
+      if (line.startsWith('@@')) {
+        // Hunk headers are "@@ -old,len +new,len @@"; take the new-file start.
+        const m = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)/);
+        lineNum = m ? parseInt(m[1]) : lineNum;
+        continue;
+      }
+      if (line.startsWith('+') && !line.startsWith('+++')) {
+        findings.push(...scanLine(line, lineNum, file.filename, commit));
+      }
+      if (!line.startsWith('-')) lineNum++;
+
+      // Yield to the event loop periodically so a file with many lines
+      // can't monopolize the server for the whole scan — other pending
+      // requests (status polls, unrelated API calls) get a turn.
+      if (++processedLines % 80 === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    }
+  }
+  return findings;
+}
+
+/** One finding per file/line/type, however many commits touched it. */
+export function dedupeSecretFindings(findings: SecretFinding[]): SecretFinding[] {
+  return findings.filter(
+    (f, i, arr) =>
+      arr.findIndex((x) => x.file === f.file && x.line === f.line && x.type === f.type) === i
+  );
+}
+
 export async function runGhostCommit(owner: string, repo: string) {
   const commitsRes = await octokit.repos.listCommits({ owner, repo, per_page: 50 });
   const commits = commitsRes.data.slice(0, 30);
@@ -116,48 +175,12 @@ export async function runGhostCommit(owner: string, repo: string) {
   for (const commit of commits) {
     try {
       const detail = await octokit.repos.getCommit({ owner, repo, ref: commit.sha });
-      for (const file of detail.data.files ?? []) {
-        // Skip files with massive patches — real secrets are never buried
-        // 60KB deep in a single patch, and this bounds the worst-case
-        // synchronous regex/entropy work done per file (this is what let a
-        // single scan peg the Node event loop for minutes and stall every
-        // other in-flight request).
-        if (!file.patch || file.patch.length > 60000) continue;
-        if (shouldSkipFile(file.filename)) continue;
-        if (file.filename.includes('node_modules') || file.filename.includes('.min.')) continue;
-
-        // Belt-and-suspenders alongside the byte cap above: even a <60KB
-        // patch could still be thousands of short lines, so also cap how
-        // many lines of any one file get scanned.
-        const lines = file.patch.split('\n').slice(0, 1000);
-        let lineNum = 0;
-        let processedLines = 0;
-        for (const line of lines) {
-          if (line.startsWith('@@')) {
-            const m = line.match(/@@ \+(\d+)/);
-            lineNum = m ? parseInt(m[1]) : lineNum;
-            continue;
-          }
-          if (line.startsWith('+') && !line.startsWith('+++')) {
-            findings.push(
-              ...scanLine(line, lineNum, file.filename, {
-                sha: commit.sha,
-                message: commit.commit.message.substring(0, 72),
-                author: commit.commit.author?.name ?? 'unknown',
-                date: commit.commit.author?.date ?? '',
-              })
-            );
-          }
-          if (!line.startsWith('-')) lineNum++;
-
-          // Yield to the event loop periodically so a file with many lines
-          // can't monopolize the server for the whole scan — other pending
-          // requests (status polls, unrelated API calls) get a turn.
-          if (++processedLines % 80 === 0) {
-            await new Promise((resolve) => setTimeout(resolve, 0));
-          }
-        }
-      }
+      findings.push(...await scanCommitFiles(detail.data.files ?? [], {
+        sha: commit.sha,
+        message: commit.commit.message.substring(0, 72),
+        author: commit.commit.author?.name ?? 'unknown',
+        date: commit.commit.author?.date ?? '',
+      }));
       await new Promise((r) => setTimeout(r, 120)); // rate limit guard
     } catch (err) {
       // A GitHub API error means commits went unscanned; surface it rather
@@ -166,10 +189,5 @@ export async function runGhostCommit(owner: string, repo: string) {
     }
   }
 
-  const deduped = findings.filter(
-    (f, i, arr) =>
-      arr.findIndex((x) => x.file === f.file && x.line === f.line && x.type === f.type) === i
-  );
-
-  return { findings: deduped, totalCommitsScanned: commits.length };
+  return { findings: dedupeSecretFindings(findings), totalCommitsScanned: commits.length };
 }

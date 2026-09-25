@@ -98,6 +98,31 @@ positive rate, using the same benchmarking approach industry tools
 like gitleaks use. The composite score is a relative risk indicator
 built from those verified findings, not a black-box prediction."
 
-Fill in the bracketed numbers once the fixture set + script exist
-(tracked as its own GitHub issue: "No validation corpus / published
-accuracy numbers for DepChain / GhostCommit").
+MEASURED (npm run benchmark, 2026-09-25; details in
+scripts/benchmark/RESULTS.md):
+
+  DepChain: 12 known-vulnerable package versions (event-stream 3.3.6,
+  ua-parser-js 0.7.29, node-ipc 10.1.1, minimist 1.2.5, lodash 4.17.20,
+  ...) and their 12 patched releases. 12/12 detected, 0/12 reported on
+  the patched version, 0 advisories invented; exact agreement with
+  OSV.dev on all 24 versions (81 advisories).
+
+  GhostCommit: 25 planted fake secrets, 59 clean lines (15 of them
+  secret-looking). Recall 84% overall (95% on vendor-format keys, 40% on
+  unstructured passwords/hex tokens). 0 false positives on ordinary code;
+  10 of 15 secret-looking non-secrets flagged (integrity hashes, public
+  keys, .env.example placeholders). Precision 68%.
+
+So the talking point, filled in:
+
+  "DepChain: 12 of 12 known-vulnerable versions caught, zero false
+   positives on patched versions, exact agreement with OSV.dev.
+   GhostCommit: 84% recall on a planted-secret test set, 95% on
+   vendor-format keys; zero false positives on ordinary code, but it
+   over-flags hashes and placeholders, so treat it as a first pass."
+
+The benchmark also confirmed the entropy-threshold concern from section
+2: a pure-hex secret can never exceed 4.5 bits/char, so it is only caught
+when its variable name matches a pattern (e.g. AUTH_TOKEN=).
+
+Re-run before quoting numbers: DepChain's depend on OSV.dev's live data.
