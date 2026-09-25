@@ -33,9 +33,51 @@ The score is a transparent, additive model, not a statistical one. Four buckets 
 | **Secrets**      | `10 × secrets found in recent commits`                                   | 20  | A leaked secret is exploitable immediately, but two or three already means "rotate everything".                 |
 | **Code / API**   | `5 × unauthenticated write endpoints`                                    | 10  | Heuristic route detection has the highest false-positive rate, so it gets the smallest share.                   |
 
-Severity weights: critical 15, high 8, medium 4, low 1, info 0. Bands: 0-9 nominal, 10-39 elevated, 40-69 high, 70+ critical.
+Severity weights: critical 15, high 8, medium 4, low 1, info 0. Each step roughly doubles, so one critical outweighs a high and a medium together, lows are near-noise, and informational findings never move the score. Bands: 0-9 nominal, 10-39 elevated, 40-69 high, 70+ critical.
+
+A package that is both vulnerable and carries a risk signal counts in both dependency terms (8 + 4), since those are independent problems.
+
+**Worked example: why 73 and not 60.** Every point traces back to a finding:
+
+| Bucket       | Repo B                                           | Repo A (B + two findings)                          |
+| ------------ | ------------------------------------------------ | -------------------------------------------------- |
+| Infra        | 1 critical + 1 high + 2 low = 15 + 8 + 1 + 1 = **25** | + 1 more high finding → **33**                     |
+| Dependencies | 2 vulnerable + 1 risky = 16 + 4 = **20**         | **20**                                             |
+| Secrets      | 1 secret = **10**                                | **10**                                             |
+| Code / API   | 1 unauthenticated write endpoint = **5**         | + 1 more endpoint → **10** (bucket now at its cap) |
+| **Total**    | **60**                                           | **73**                                             |
+
+Repo A is 13 points worse because of one extra high-severity infra finding (+8) and one extra open write endpoint (+5). A third open endpoint would add nothing, because the Code / API bucket is capped at 10. Fixing the extra high finding in Repo A would drop it to 65, which is still in the high band. The per-bucket breakdown is also shown on the scan page's threat gauge.
 
 The weights and caps are hand-chosen ordinal judgements (confirmed and exploitable beats heuristic), not derived from CVSS aggregation or a benchmark. Read the score as a triage ranking and use the per-finding severities for the actual decisions. A scanner that fails contributes 0 rather than failing the scan.
+
+### Measured accuracy
+
+The composite score has no ground truth, but two of the scanners that feed it do, and they are benchmarked with `npm run benchmark` against the same code a real scan runs. Full per-case results: [`scripts/benchmark/RESULTS.md`](scripts/benchmark/RESULTS.md).
+
+**DepChain (known CVEs).** 12 npm packages pinned to a version with a known advisory (including event-stream 3.3.6, ua-parser-js 0.7.29, node-ipc 10.1.1, minimist 1.2.5, lodash 4.17.20) and to the release that fixed it:
+
+| Metric | Result |
+| --- | --- |
+| Known advisory detected on the vulnerable version | 12/12 (100%) |
+| Same advisory reported on the patched version | 0/12 |
+| Advisories reported that OSV.dev does not list for that version | 0 |
+| Agreement with OSV.dev across all 24 versions (81 advisories) | 24/24 exact |
+
+This shows DepChain reports exactly what OSV.dev knows, with nothing missed or invented. It cannot flag a compromise OSV hasn't catalogued yet, so it would not have caught event-stream on day zero.
+
+**GhostCommit (secrets in commit history).** A labelled corpus of 25 planted fake secrets and 59 clean lines, 15 of which are deliberately secret-looking (hashes, public keys, placeholders):
+
+| Metric | Result |
+| --- | --- |
+| Recall, all planted secrets | 21/25 (84%) |
+| Recall, vendor-format keys (AWS, GitHub, Stripe, Slack, JWT, private keys…) | 19/20 (95%) |
+| Recall, unstructured secrets (passwords, hex tokens) | 2/5 (40%) |
+| False positives on ordinary code | 0/44 |
+| False positives on secret-looking non-secrets | 10/15 |
+| Precision | 21/31 (68%) |
+
+Known weak spots: human-chosen passwords and pure-hex secrets (hex never exceeds the 4.5-bit entropy threshold), and integrity hashes, public keys and `.env.example` placeholders get flagged. Treat GhostCommit as a high-recall first pass for vendor keys, not a complete secret audit.
 
 ---
 

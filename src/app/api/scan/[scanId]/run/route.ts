@@ -23,6 +23,10 @@ interface ScanResults {
   envtrace: EnvTraceResult | null;
 }
 
+// Additive triage score: four capped buckets (infra 40, deps 30, secrets 20,
+// code/API 10). Methodology and a worked example live in README.md under
+// "How the threat score works"; ThreatGauge.tsx mirrors the bucket math, so
+// keep all three in sync when changing a weight or cap.
 function calcThreatScore(r: ScanResults): number {
   const sevWeight: Record<Severity, number> = {
     critical: 15, high: 8, medium: 4, low: 1, info: 0,

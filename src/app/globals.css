@@ -3,7 +3,11 @@
 @import '@fontsource/inter/400.css';
 @import '@fontsource/inter/500.css';
 @import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+@import '@fontsource/jetbrains-mono/600.css';
 @import '@fontsource/jetbrains-mono/700.css';
+/* Landing page only — variable weight + width axes for the Entry design's expanded display type. */
+@import '@fontsource-variable/archivo/wdth.css';
 
 @import "tailwindcss";
 
@@ -224,10 +228,129 @@ html, body, #__next {
   pointer-events: none;
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+   Entry landing page (src/app/page.tsx + components/landing/*)
+   Ported from the design reference at HTML/01 · Entry — Landing-html.
+   All `entry-*` / `ef-*` names are scoped to that page only.
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* Expanded display type (Archivo variable width axis) */
+.font-entry { font-family: 'Archivo Variable', 'Archivo', ui-sans-serif, system-ui, sans-serif; }
+
+/* Form-control resets the reference depends on, scoped to the landing stage so
+   buttons/inputs inherit the surrounding type instead of the UA default font.
+   Inline styles on those elements still win over these. */
+.entry-stage button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+.entry-stage input { font: inherit; color: inherit; background: none; border: 0; outline: none; }
+
+/* Starfield */
+.ef-star { position: absolute; border-radius: 50%; background: #9FC3E8; }
+@keyframes ef-twinkle { 0%, 100% { opacity: .15; } 50% { opacity: .8; } }
+.ef-tw { animation: ef-twinkle 4s ease-in-out infinite; }
+
+/* Dependency edges */
+.ef-edge { position: absolute; height: 1px; transform-origin: 0 50%; background: rgba(66,132,235,.34); }
+@keyframes ef-flow { to { background-position: 14px 0; } }
+.ef-edge-threat {
+  height: 1.5px;
+  background: repeating-linear-gradient(90deg, #FF3D4F 0 7px, rgba(255,61,79,.12) 7px 14px);
+  background-size: 14px 100%;
+  animation: ef-flow 1s linear infinite;
+}
+.ef-edge-high { background: rgba(255,138,43,.45); }
+
+/* Package nodes */
+.ef-node { position: absolute; border-radius: 50%; background: #2E6BE0; }
+.ef-node-in { background: #1B3F8E; }
+.ef-node-high { background: #FF8A2B; box-shadow: 0 0 10px 2px rgba(255,138,43,.45); }
+@keyframes ef-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255,61,79,.6), 0 0 12px 3px rgba(255,61,79,.5); }
+  50%      { box-shadow: 0 0 0 7px rgba(255,61,79,0), 0 0 20px 5px rgba(255,61,79,.6); }
+}
+.ef-node-crit { background: #FF3D4F; animation: ef-pulse 2.4s ease-in-out infinite; }
+
+/* Node labels */
+.ef-label {
+  position: absolute;
+  font: 500 10px/1 'JetBrains Mono', ui-monospace, monospace;
+  white-space: nowrap;
+  letter-spacing: .04em;
+}
+
+/* Scan sweep across the field — travel distance is set from the field's box */
+@keyframes ef-sweep {
+  0%   { transform: translateY(calc(var(--ef-sweep-dist, 250px) * -1)); opacity: 0; }
+  10%  { opacity: 1; }
+  90%  { opacity: 1; }
+  100% { transform: translateY(var(--ef-sweep-dist, 250px)); opacity: 0; }
+}
+.ef-sweep { animation: ef-sweep 7s ease-in-out infinite; }
+
+/* Live status blink */
+@keyframes entry-blink { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+.entry-live { animation: entry-blink 1.8s ease-in-out infinite; }
+
+/* Terminal caret */
+@keyframes entry-caret { 50% { opacity: 0; } }
+.entry-caret { animation: entry-caret 1s steps(1) infinite; }
+
+/* Incident-archive marquee — translates exactly half the duplicated list */
+@keyframes entry-tick { to { transform: translateX(-50%); } }
+.entry-tick { animation: entry-tick 38s linear infinite; }
+
+/* Hover states from the reference */
+.entry-cta:hover:not(:disabled) { background: #8BE9FA !important; color: #03060B !important; }
+.entry-chip:hover:not(:disabled) { border-color: #2A4966 !important; color: #D5E1EC !important; }
+.entry-engine:hover { background: #070D16; }
+.entry-navlink { transition: color .18s ease; }
+.entry-navlink:hover { color: #8BE9FA !important; }
+.entry-sample:hover { background: #0B1421; color: #D5E1EC !important; }
+.entry-input::placeholder { color: #44546A; }
+.entry-cta, .entry-chip { transition: background .18s ease, color .18s ease, border-color .18s ease; }
+
 /* ── Reduced motion ── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+}
+/* ── Scan-in-progress console (html/02 · Scan in progress) ─────────────
+   All `sc-*` names are scoped to src/components/scan/ScanConsole.tsx. */
+.sc-root button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+.sc-btn { transition: color .18s ease, border-color .18s ease; }
+.sc-btn:hover { color: #8BE9FA !important; border-color: #2A4966 !important; }
+.sc-ed { position: absolute; height: 1px; transform-origin: 0 50%; background: rgba(62,128,235,.34); pointer-events: none; }
+.sc-e-g { background: rgba(79,216,240,.3); }
+.sc-e-x { background: rgba(62,128,235,.14); }
+.sc-e-t {
+  height: 1.5px;
+  background: repeating-linear-gradient(90deg, #FF3D4F 0 7px, rgba(255,61,79,.14) 7px 14px);
+  background-size: 14px 100%;
+  animation: sc-flow 1.1s linear infinite;
+}
+@keyframes sc-flow { to { background-position: 14px 0; } }
+.sc-nd { position: absolute; border-radius: 50%; background: #3576EE; animation: sc-appear .6s ease-out; pointer-events: none; }
+@keyframes sc-appear { from { transform: scale(3); opacity: 0; } }
+.sc-k-tdep { background: #1D48A6; }
+.sc-k-hub { background: transparent; border: 1px solid #4FD8F0; }
+.sc-k-commit { background: #04121A; border: 1.5px solid #4FD8F0; }
+.sc-k-file { border-radius: 1px; background: transparent; border: 1.5px solid #9FB3C8; }
+.sc-k-secret { border-radius: 1px; }
+.sc-k-layer { border-radius: 1px; background: #1E4DB0; border: 1px solid #3576EE; }
+.sc-k-api { border-radius: 1px; background: #5B95FF; }
+.sc-k-core { background: radial-gradient(circle at 34% 32%, #FFC48A, #FF8A2B 55%, #B94A00); box-shadow: 0 0 36px 8px rgba(255,138,43,.3); }
+.sc-s-crit { background: #FF3D4F; border-color: #FF3D4F; box-shadow: 0 0 14px 3px rgba(255,61,79,.55); }
+.sc-s-high { background: #FF8A2B; border-color: #FF8A2B; box-shadow: 0 0 10px 2px rgba(255,138,43,.45); }
+.sc-radar { animation: sc-spin 4.5s linear infinite; }
+@keyframes sc-spin { to { transform: rotate(360deg); } }
+.sc-live { animation: sc-blink 1.6s ease-in-out infinite; }
+@keyframes sc-blink { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+.sc-caret { animation: sc-caret 1s steps(1) infinite; }
+@keyframes sc-caret { 50% { opacity: 0; } }
+.sc-row { animation: sc-rowin .4s ease-out; }
+@keyframes sc-rowin { from { opacity: 0; transform: translateY(4px); } }
+@media (max-width: 1100px) { .sc-hide-sm { display: none !important; } }
+@media (prefers-reduced-motion: reduce) {
+  .sc-radar, .sc-e-t, .sc-live, .sc-caret, .sc-nd, .sc-row { animation: none; }
 }
