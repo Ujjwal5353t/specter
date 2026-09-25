@@ -3,7 +3,7 @@ import type { ScanResult, ScannerProgress } from '@/types';
 
 /** Shape of GET /api/scan/[scanId]/status. */
 export interface ScanStatusResponse {
-  scan?: { status: string; repo_url: string; threat_score: number | null; error_message?: string | null; from_cache?: boolean };
+  scan?: { status: string; repo_url: string; threat_score: number | null; error_message?: string | null; from_cache?: boolean; created_at?: string };
   cache?: {
     dep_data?: ScanResult['depchain'];
     secret_data?: ScanResult['ghostcommit'];
@@ -50,6 +50,10 @@ interface ScanStore {
   repoUrl: string | null;
   /** Per-scanner state while a scan runs; null before /run reports any. */
   progress: ScannerProgress[] | null;
+  /** When the polled scan was created (from /status); drives the elapsed clock. */
+  scanCreatedAt: string | null;
+  /** First time each scanner state (scanner:status:detail) was seen by a poll, in ms — the telemetry stream's clock. */
+  progressSeen: Record<string, number>;
   setScanResult: (result: ScanResult) => void;
   setSelectedNode: (id: string | null) => void;
   setSidebarOpen: (open: boolean) => void;
@@ -74,6 +78,8 @@ export const useScanStore = create<ScanStore>((set, get) => ({
   error: null,
   repoUrl: null,
   progress: null,
+  scanCreatedAt: null,
+  progressSeen: {},
 
   setScanResult: (result) => set({ scanResult: result, isLoading: false }),
   setSelectedNode: (id) => set({ selectedNode: id, sidebarOpen: id !== null }),
@@ -83,13 +89,13 @@ export const useScanStore = create<ScanStore>((set, get) => ({
 
   reset: () => {
     get().stopPolling();
-    set({ scanResult: null, selectedNode: null, sidebarOpen: false, error: null, repoUrl: null, isLoading: false, progress: null });
+    set({ scanResult: null, selectedNode: null, sidebarOpen: false, error: null, repoUrl: null, isLoading: false, progress: null, scanCreatedAt: null, progressSeen: {} });
   },
 
   startPolling: (scanId: string) => {
     // Drop any previous scan's result/error so they can't bleed into this one
     get().stopPolling();
-    set({ isPolling: true, scanResult: null, error: null, repoUrl: null, progress: null, selectedNode: null, sidebarOpen: false });
+    set({ isPolling: true, scanResult: null, error: null, repoUrl: null, progress: null, scanCreatedAt: null, progressSeen: {}, selectedNode: null, sidebarOpen: false });
     const token = pollToken;
     const startedAt = Date.now();
     pollInterval = setInterval(async () => {
@@ -103,8 +109,19 @@ export const useScanStore = create<ScanStore>((set, get) => ({
         if (!res.ok) throw new Error('Status check failed');
         const data: ScanStatusResponse = await res.json();
         if (token !== pollToken) return;
-        if (data.progress) set({ progress: data.progress });
+        if (data.progress) {
+          const seen = get().progressSeen;
+          const fresh = data.progress
+            .map((p) => `${p.scanner}:${p.status}:${p.detail ?? ''}`)
+            .filter((k) => !(k in seen));
+          const stamp = Date.now();
+          set({
+            progress: data.progress,
+            ...(fresh.length ? { progressSeen: { ...seen, ...Object.fromEntries(fresh.map((k) => [k, stamp])) } } : {}),
+          });
+        }
         if (data.scan?.repo_url) set({ repoUrl: data.scan.repo_url });
+        if (data.scan?.created_at) set({ scanCreatedAt: data.scan.created_at });
 
         if (data.scan?.status === 'completed') {
           get().stopPolling();

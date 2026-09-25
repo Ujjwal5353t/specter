@@ -4,7 +4,7 @@ import ScannerBadges from '@/components/ui/ScannerBadges';
 import FindingsList from '@/components/ui/FindingsList';
 import AIPanel, { type AIStatus } from '@/components/ui/AIPanel';
 import ThreatFlash from '@/components/ui/ThreatFlash';
-import ScanLoader from '@/components/ui/ScanLoader';
+import ScanConsole from '@/components/scan/ScanConsole';
 import SpecterLogo from '@/components/ui/SpecterLogo';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
@@ -308,12 +308,14 @@ export default function ScanPage() {
   // A demo id with nothing in the store (hard refresh) has no backing scan to fetch.
   const notFound = notFoundId === routeScanId || (routeScanId?.startsWith('demo-') && !isReady && !isPolling);
   const isDemo = !!scanResult?.scanId.startsWith('demo-');
+  // The live console owns the whole viewport (with its own new-scan control) while a scan runs.
+  const showConsole = (isPolling || isLoading) && !isReady && !error;
 
   return (
     <main className="relative w-full h-screen overflow-hidden bg-transparent">
       {isReady && <ThreatFlash score={scanResult!.threatScore} />}
 
-      <button
+      {!showConsole && <button
         onClick={handleBack}
         className="tactical-btn absolute top-6 left-6 z-50 flex items-center gap-2 group px-4 py-2.5 rounded-sm shadow-lg pointer-events-auto cursor-pointer"
         style={{ background: 'rgba(0,240,255,0.08)', border: '1px solid var(--accent)', backdropFilter: 'blur(8px)' }}
@@ -322,10 +324,10 @@ export default function ScanPage() {
         <span className="font-mono text-[10px] tracking-widest uppercase font-bold text-white group-hover:text-accent-hi transition-colors">
           + NEW SCAN
         </span>
-      </button>
+      </button>}
 
       <AnimatePresence>
-        {(isPolling || isLoading) && !isReady && <ScanLoader />}
+        {showConsole && <ScanConsole key={routeScanId} scanId={routeScanId} onNewScan={handleBack} />}
       </AnimatePresence>
 
       <AnimatePresence>
