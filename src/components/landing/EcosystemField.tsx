@@ -23,11 +23,15 @@ const YAW_STEP = 0.0035;
 const TICK_MS = 50;
 
 // Untransformed extent of the globe (frame + breathing room), used to derive a
-// fit scale. The field is the page's centrepiece, so it's allowed to grow with
-// the viewport; the cap only stops it ballooning on very tall screens.
-const NATURAL_SPAN = 690;
+// fit scale. The host below clips to its own box (so the field never spills
+// into the header or hero), so this and MAX_SCALE together must keep the
+// sphere's actual on-screen diameter (~564 * scale — the node projection
+// radius, independent of the frame/ring constants) inside that box; the caps
+// below are chosen so it comfortably is, with margin, from a short laptop
+// window up to a tall desktop one.
+const NATURAL_SPAN = 630;
 const MIN_SCALE = 0.5;
-const MAX_SCALE = 1.3;
+const MAX_SCALE = 1.1;
 // The frame's top readouts need this much width to sit side by side.
 const MIN_FRAME_W = 470;
 

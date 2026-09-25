@@ -65,12 +65,29 @@ create table if not exists public.scan_progress (
 create index if not exists findings_scan_id_idx on public.findings (scan_id);
 create index if not exists scans_repo_url_idx   on public.scans (repo_url);
 
+-- Cached verdicts for the pre-install package check (#25/#27). npm only, so
+-- no ecosystem column. Keyed on (name, version, integrity): a republished
+-- tarball under the same version number gets a different integrity and so
+-- never reuses another build's cached verdict.
+create table if not exists public.package_verdicts (
+  name          text not null,
+  version       text not null,
+  integrity     text not null default '',
+  verdict       text not null check (verdict in ('allow', 'warn', 'block')),
+  score         integer not null,
+  signals       jsonb not null default '[]'::jsonb,
+  tier_reached  text not null default 'metadata',
+  analyzed_at   timestamptz not null default now(),
+  primary key (name, version, integrity)
+);
+
 -- The app only talks to Supabase from the server with the secret key, which bypasses RLS.
 -- Enabling RLS with no policies blocks anyone using the publishable key from reading these tables.
 alter table public.scans      enable row level security;
 alter table public.findings   enable row level security;
 alter table public.scan_cache enable row level security;
 alter table public.scan_progress enable row level security;
+alter table public.package_verdicts enable row level security;
 
 -- Make PostgREST pick up the new tables immediately.
 notify pgrst, 'reload schema';
