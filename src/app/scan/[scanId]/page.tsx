@@ -2,11 +2,12 @@
 import ThreatGauge from '@/components/ui/ThreatGauge';
 import ScannerBadges from '@/components/ui/ScannerBadges';
 import FindingsList from '@/components/ui/FindingsList';
-import AIPanel from '@/components/ui/AIPanel';
+import AIPanel, { type AIStatus } from '@/components/ui/AIPanel';
 import ThreatFlash from '@/components/ui/ThreatFlash';
 import ScanLoader from '@/components/ui/ScanLoader';
 import SpecterLogo from '@/components/ui/SpecterLogo';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useScanStore, resultFromStatus, type ScanStatusResponse } from '@/store/scanStore';
@@ -20,6 +21,22 @@ function timeAgo(iso: string): string {
   return `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
 }
 
+/** Findings sent to /api/explain; the server briefs only the most severe tier. */
+function buildAiFindings(scanResult: ScanResult) {
+  return [
+    ...(scanResult.depchain?.nodes?.filter((n) => (n.cves?.length ?? 0) > 0).flatMap((n) =>
+      n.cves.map((c) => ({ scanner: 'depchain', title: `${n.name}@${n.version}`, detail: c.summary, severity: c.severity }))
+    ) ?? []),
+    ...(scanResult.depchain?.nodes?.flatMap((n) =>
+      (n.signals ?? []).filter((s) => s.severity !== 'low').map((s) => ({ scanner: 'depchain', title: `${s.title}: ${n.name}@${n.version}`, detail: s.detail, severity: s.severity }))
+    ) ?? []),
+    ...(scanResult.ghostcommit?.findings?.map((f) => ({ scanner: 'ghostcommit', title: f.type, detail: f.file, severity: 'critical' as const })) ?? []),
+    ...(scanResult.layerscan?.findings?.map((f) => ({ scanner: 'layerscan', title: f.issue.substring(0, 60), detail: f.fix, severity: f.severity })) ?? []),
+    ...(scanResult.apibleed?.endpoints?.filter((e) => e.issues.length > 0).map((e) => ({ scanner: 'apibleed', title: `${e.method} ${e.path}`, detail: e.issues[0], severity: e.severity })) ?? []),
+    ...(scanResult.envtrace?.findings?.map((f) => ({ scanner: 'envtrace', title: f.type, detail: f.detail, severity: f.severity })) ?? []),
+  ];
+}
+
 interface SidebarProps {
   scanResult: ScanResult;
   scannerFilter: string | null;
@@ -28,34 +45,41 @@ interface SidebarProps {
   pdfLoading: boolean;
   onRescan: () => void;
   rescanning: boolean;
+  rescanError: string | null;
+  /** Bundled demo fixtures have no backing scan, so a rescan would have nothing to re-run. */
+  isDemo: boolean;
+  aiStatus: AIStatus;
+  onRetryAi: () => void;
 }
 
 // Extracted to module scope (was previously declared inside ScanPage's body,
 // which recreated it — and remounted the whole sidebar, losing expanded-
 // finding state and replaying every entrance animation — on every unrelated
 // re-render, e.g. dragging the mobile sheet).
-function ScanSidebar({ scanResult, scannerFilter, onFilterChange, onExportPdf, pdfLoading, onRescan, rescanning }: SidebarProps) {
+function ScanSidebar({ scanResult, scannerFilter, onFilterChange, onExportPdf, pdfLoading, onRescan, rescanning, rescanError, isDemo, aiStatus, onRetryAi }: SidebarProps) {
   return (
     <>
       <div className="scan-line-effect absolute inset-0 pointer-events-none z-10 overflow-hidden rounded-none" />
       <div className="px-5 md:pt-16 pt-2 pb-4 shrink-0 relative z-20" style={{ borderBottom: '1px solid var(--border)' }}>
         <div className="absolute top-4 right-5 z-20 flex items-center gap-2">
-          <button
-            onClick={onRescan}
-            disabled={rescanning}
-            title="Ignore cached results and run every scanner again. Slower, but reflects the latest repo state and scanner fixes."
-            className="tactical-btn flex items-center gap-2 px-3 py-1.5 rounded-sm cursor-pointer disabled:opacity-60"
-            style={{ color: 'var(--ink)' }}
-          >
-            {rescanning ? (
-              <span className="w-2.5 h-2.5 rounded-full border-2 border-t-transparent animate-spin" style={{ borderColor: 'var(--accent-hi) transparent transparent transparent' }} />
-            ) : (
-              <svg width="11" height="11" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M10 6a4 4 0 1 1-1.2-2.85M10 1.5v2.5H7.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            )}
-            <span className="font-mono text-[10px] tracking-wider">{rescanning ? 'STARTING…' : 'DEEP RESCAN'}</span>
-          </button>
+          {!isDemo && (
+            <button
+              onClick={onRescan}
+              disabled={rescanning}
+              title="Ignore cached results and run every scanner again. Slower, but reflects the latest repo state and scanner fixes."
+              className="tactical-btn flex items-center gap-2 px-3 py-1.5 rounded-sm cursor-pointer disabled:opacity-60"
+              style={{ color: 'var(--ink)' }}
+            >
+              {rescanning ? (
+                <span className="w-2.5 h-2.5 rounded-full border-2 border-t-transparent animate-spin" style={{ borderColor: 'var(--accent-hi) transparent transparent transparent' }} />
+              ) : (
+                <svg width="11" height="11" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M10 6a4 4 0 1 1-1.2-2.85M10 1.5v2.5H7.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+              <span className="font-mono text-[10px] tracking-wider">{rescanning ? 'STARTING…' : 'RESCAN'}</span>
+            </button>
+          )}
           <button
             onClick={onExportPdf}
             disabled={pdfLoading}
@@ -76,13 +100,13 @@ function ScanSidebar({ scanResult, scannerFilter, onFilterChange, onExportPdf, p
       </div>
 
       {/* A cached result skipped the scanners entirely — say so, and point at the fresh-data path */}
-      {scanResult.fromCache && (
+      {!isDemo && (scanResult.fromCache || rescanError) && (
         <div
           className="px-5 py-2 shrink-0 relative z-20 flex items-center justify-between gap-3"
           style={{ borderBottom: '1px solid var(--border)', background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}
         >
-          <span className="font-mono text-[9px] tracking-wider uppercase" style={{ color: 'var(--ink)' }}>
-            Cached result{scanResult.scannedAt ? ` · scanned ${timeAgo(scanResult.scannedAt)}` : ''}
+          <span className="font-mono text-[9px] tracking-wider uppercase" style={{ color: rescanError ? 'var(--critical)' : 'var(--ink)' }}>
+            {rescanError ?? `Cached${scanResult.scannedAt ? ` · ${timeAgo(scanResult.scannedAt)}` : ' result'}`}
           </span>
           <button
             onClick={onRescan}
@@ -90,7 +114,7 @@ function ScanSidebar({ scanResult, scannerFilter, onFilterChange, onExportPdf, p
             className="font-mono text-[9px] tracking-wider uppercase cursor-pointer disabled:opacity-60 shrink-0"
             style={{ color: 'var(--accent-hi)' }}
           >
-            ▶ deep rescan for fresh data
+            ▶ {rescanError ? 'retry rescan' : 'rescan for fresh data'}
           </button>
         </div>
       )}
@@ -106,11 +130,9 @@ function ScanSidebar({ scanResult, scannerFilter, onFilterChange, onExportPdf, p
           hasAiExplanation={!!scanResult.aiExplanation}
           onRequestAiFocus={() => document.getElementById('ai-intelligence-brief')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
         />
-        {scanResult.aiExplanation && (
-          <div id="ai-intelligence-brief">
-            <AIPanel explanation={scanResult.aiExplanation} />
-          </div>
-        )}
+        <div id="ai-intelligence-brief">
+          <AIPanel explanation={scanResult.aiExplanation} status={aiStatus} onRetry={onRetryAi} />
+        </div>
       </div>
 
       <div
@@ -129,14 +151,20 @@ function ScanSidebar({ scanResult, scannerFilter, onFilterChange, onExportPdf, p
 export default function ScanPage() {
   const params = useParams();
   const router = useRouter();
-  const { scanResult, isPolling, isLoading, error, reset, startPolling, setScanResult, setError } = useScanStore();
-  const aiRef = useRef<{ fetched: boolean }>({ fetched: false });
+  const { scanResult, isPolling, isLoading, error, repoUrl, reset, startPolling, setScanResult, setError } = useScanStore();
+  // Last scan id the brief was requested for; a failed request clears it so Retry can re-fire.
+  const aiRef = useRef<{ fetchedFor: string | null }>({ fetchedFor: null });
   const hydrateRef = useRef(false);
+  const mountedRef = useRef(false);
 
   const [isMobileExpanded, setIsMobileExpanded] = useState(false);
   const [scannerFilter, setScannerFilter] = useState<string | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [rescanning, setRescanning] = useState(false);
+  const [rescanError, setRescanError] = useState<string | null>(null);
+  const [notFoundId, setNotFoundId] = useState<string | null>(null);
+  // Keyed by scan so a previous scan's failure can't show on the next one.
+  const [aiState, setAiState] = useState<{ scanId: string; status: AIStatus }>({ scanId: '', status: 'idle' });
 
   const handleBack = () => {
     // Otherwise the rehydrate effect sees the emptied store before this page
@@ -145,6 +173,19 @@ export default function ScanPage() {
     reset();
     router.push('/');
   };
+
+  // Stop polling when the page unmounts (browser back, link away). Deferred a
+  // tick so React strict mode's simulated unmount/remount doesn't kill a poll
+  // that was just started from the landing page.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      setTimeout(() => {
+        if (!mountedRef.current) useScanStore.getState().stopPolling();
+      }, 0);
+    };
+  }, []);
 
   // Rehydrate on a direct visit / page refresh: the store only lives in
   // memory, so opening /scan/[id] with nothing loaded (no prior /start or
@@ -156,78 +197,96 @@ export default function ScanPage() {
     // Already loaded in this session (via /start or a demo): nothing to rehydrate.
     if (scanResult || isPolling || isLoading) return;
 
+    // Demo ids only exist in the store; after a refresh there is nothing to fetch.
+    if (scanId.startsWith('demo-')) return;
+
     (async () => {
       try {
         const res = await fetch(`/api/scan/${scanId}/status`);
-        if (!res.ok) return;
+        if (res.status === 404) {
+          setNotFoundId(scanId);
+          return;
+        }
+        if (!res.ok) {
+          setError('Could not load this scan. Try again in a moment.');
+          return;
+        }
         const data: ScanStatusResponse = await res.json();
         if (data.scan?.status === 'completed') {
           setScanResult(resultFromStatus(scanId, data));
         } else if (data.scan?.status === 'scanning' || data.scan?.status === 'pending') {
           startPolling(scanId);
         } else if (data.scan?.status === 'failed') {
+          useScanStore.setState({ repoUrl: data.scan.repo_url ?? null });
           setError(data.scan.error_message ?? 'Scan failed. The repo may be private or the URL is incorrect.');
         }
       } catch {
-        /* leave state as-is on a transient error */
+        setError('Could not load this scan. Try again in a moment.');
       }
     })();
   }, [params.scanId, scanResult, isPolling, isLoading, setScanResult, startPolling, setError]);
 
+  const runAi = useCallback((result: ScanResult) => {
+    const findings = buildAiFindings(result);
+    if (findings.length === 0) return;
+    const id = result.scanId;
+    aiRef.current.fetchedFor = id;
+    setAiState({ scanId: id, status: 'loading' });
+
+    const finish = (status: AIStatus) => setAiState({ scanId: id, status });
+    fetch('/api/explain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ findings }) })
+      .then(async (res) => {
+        const data = await res.json().catch(() => null);
+        if (res.status === 503 && data?.error === 'ai_not_configured') return finish('unconfigured');
+        // Error responses ({ error }) have no items array and would crash AIPanel.
+        if (!res.ok || !data || typeof data.summary !== 'string' || !Array.isArray(data.items)) {
+          console.error('AI brief unavailable:', data?.detail ?? data?.error ?? res.status);
+          return finish('failed');
+        }
+        // Drop the response if the user has moved on to another scan meanwhile.
+        if (useScanStore.getState().scanResult?.scanId !== id) return;
+        useScanStore.setState((s) => ({ scanResult: s.scanResult ? { ...s.scanResult, aiExplanation: data } : s.scanResult }));
+        finish('ok');
+      })
+      .catch((e) => {
+        console.error('AI brief unavailable:', e);
+        finish('failed');
+      });
+  }, []);
+
   useEffect(() => {
-    if (!scanResult || scanResult.status !== 'completed' || aiRef.current.fetched) return;
-    if (scanResult.aiExplanation) return;
-    aiRef.current.fetched = true;
+    if (!scanResult || scanResult.status !== 'completed') return;
+    if (scanResult.aiExplanation || aiRef.current.fetchedFor === scanResult.scanId) return;
+    // Marked per scan id up front so the scanResult update that merges the
+    // brief in can't re-fire this; a failed request is retried via the panel's
+    // Retry button instead of automatically.
+    runAi(scanResult);
+  }, [scanResult, runAi]);
 
-    const allFindings = [
-      ...(scanResult.depchain?.nodes?.filter((n) => (n.cves?.length ?? 0) > 0).flatMap((n) =>
-        n.cves.map((c) => ({ scanner: 'depchain', title: `${n.name}@${n.version}`, detail: c.summary, severity: c.severity }))
-      ) ?? []),
-      ...(scanResult.depchain?.nodes?.flatMap((n) =>
-        (n.signals ?? []).filter((s) => s.severity !== 'low').map((s) => ({ scanner: 'depchain', title: `${s.title}: ${n.name}@${n.version}`, detail: s.detail, severity: s.severity }))
-      ) ?? []),
-      ...(scanResult.ghostcommit?.findings?.map((f) => ({ scanner: 'ghostcommit', title: f.type, detail: f.file, severity: 'critical' as const })) ?? []),
-      ...(scanResult.layerscan?.findings?.map((f) => ({ scanner: 'layerscan', title: f.issue.substring(0, 60), detail: f.fix, severity: f.severity })) ?? []),
-      ...(scanResult.apibleed?.endpoints?.filter((e) => e.issues.length > 0).map((e) => ({ scanner: 'apibleed', title: `${e.method} ${e.path}`, detail: e.issues[0], severity: e.severity })) ?? []),
-      ...(scanResult.envtrace?.findings?.map((f) => ({ scanner: 'envtrace', title: f.type, detail: f.detail, severity: f.severity })) ?? []),
-    ];
+  const aiStatus: AIStatus = scanResult && aiState.scanId === scanResult.scanId ? aiState.status : 'idle';
 
-    if (allFindings.length > 0) {
-      fetch('/api/explain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ findings: allFindings }) })
-        .then((r) => r.json())
-        .then((data) => {
-          // Error responses ({ error }) have no items array and would crash AIPanel.
-          if (!data || typeof data.summary !== 'string' || !Array.isArray(data.items)) {
-            console.error('AI brief unavailable:', data?.error ?? data);
-            return;
-          }
-          useScanStore.setState((s) => ({ scanResult: s.scanResult ? { ...s.scanResult, aiExplanation: data } : s.scanResult }));
-        })
-        .catch(() => {});
-    }
-    // `aiRef.current.fetched` guards against re-firing when `scanResult`
-    // changes again after the AI explanation merges back in below.
-  }, [scanResult]);
-
-  // Deep rescan: bypass the 6h cache so every scanner runs against the repo again.
+  // Rescan: bypass the 6h cache so every scanner runs against the repo again.
+  // Also serves the error state, where the repo comes from the last /status poll.
   const handleRescan = async () => {
-    if (!scanResult || rescanning) return;
+    const target = scanResult?.repoUrl || repoUrl;
+    if (!target || rescanning) return;
     setRescanning(true);
+    setRescanError(null);
     try {
       const res = await fetch('/api/scan/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repoUrl: scanResult.repoUrl, force: true }),
+        body: JSON.stringify({ repoUrl: target, force: true }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.scanId) throw new Error(data.error ?? 'Rescan failed to start');
       // Let the AI brief and rehydration run again for the new scan.
-      aiRef.current.fetched = false;
+      aiRef.current.fetchedFor = null;
       hydrateRef.current = true;
       startPolling(data.scanId);
       router.push(`/scan/${data.scanId}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Rescan failed to start');
+      setRescanError(e instanceof Error ? e.message : 'Rescan failed to start');
     } finally {
       setRescanning(false);
     }
@@ -245,6 +304,10 @@ export default function ScanPage() {
   };
 
   const isReady = !!scanResult;
+  const routeScanId = params.scanId as string;
+  // A demo id with nothing in the store (hard refresh) has no backing scan to fetch.
+  const notFound = notFoundId === routeScanId || (routeScanId?.startsWith('demo-') && !isReady && !isPolling);
+  const isDemo = !!scanResult?.scanId.startsWith('demo-');
 
   return (
     <main className="relative w-full h-screen overflow-hidden bg-transparent">
@@ -266,20 +329,39 @@ export default function ScanPage() {
       </AnimatePresence>
 
       <AnimatePresence>
-        {error && (
+        {(error || notFound) && !isReady && (
           <motion.div
             className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none"
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
           >
-            <div className="glass-panel text-center p-6 rounded-sm pointer-events-auto">
-              <p className="font-mono text-[11px] mb-4" style={{ color: 'var(--critical)' }}>{error}</p>
-              <button
-                onClick={handleBack}
-                className="tactical-btn pointer-events-auto cursor-pointer font-mono text-[10px] tracking-widest uppercase px-4 py-2 rounded-sm"
-                style={{ color: 'var(--ink)' }}
-              >
-                TRY ANOTHER REPO →
-              </button>
+            <div className="glass-panel text-center p-6 rounded-sm pointer-events-auto max-w-[calc(100vw-32px)]">
+              <p className="font-mono text-[11px] mb-4" style={{ color: 'var(--critical)' }}>
+                {notFound ? 'Scan not found. The link may be wrong or the result has expired.' : error}
+              </p>
+              {rescanError && (
+                <p className="font-mono text-[10px] mb-4" style={{ color: 'var(--high)' }}>{rescanError}</p>
+              )}
+              <div className="flex items-center justify-center gap-3 flex-wrap">
+                {/* Failed and timed-out scans can be re-run once /status has told us which repo */}
+                {!notFound && repoUrl && (
+                  <button
+                    onClick={handleRescan}
+                    disabled={rescanning}
+                    className="tactical-btn pointer-events-auto cursor-pointer disabled:opacity-60 font-mono text-[10px] tracking-widest uppercase px-4 py-2 rounded-sm"
+                    style={{ color: 'var(--accent-hi)' }}
+                  >
+                    {rescanning ? 'STARTING…' : '↻ RETRY SCAN'}
+                  </button>
+                )}
+                <Link
+                  href="/"
+                  onClick={reset}
+                  className="tactical-btn pointer-events-auto cursor-pointer font-mono text-[10px] tracking-widest uppercase px-4 py-2 rounded-sm"
+                  style={{ color: 'var(--ink)' }}
+                >
+                  {notFound ? '← BACK TO START' : 'TRY ANOTHER REPO →'}
+                </Link>
+              </div>
             </div>
           </motion.div>
         )}
@@ -304,6 +386,10 @@ export default function ScanPage() {
                 pdfLoading={pdfLoading}
                 onRescan={handleRescan}
                 rescanning={rescanning}
+                rescanError={rescanError}
+                isDemo={isDemo}
+                aiStatus={aiStatus}
+                onRetryAi={() => runAi(scanResult!)}
               />
             </motion.aside>
 
@@ -343,6 +429,10 @@ export default function ScanPage() {
                 pdfLoading={pdfLoading}
                 onRescan={handleRescan}
                 rescanning={rescanning}
+                rescanError={rescanError}
+                isDemo={isDemo}
+                aiStatus={aiStatus}
+                onRetryAi={() => runAi(scanResult!)}
               />
             </motion.aside>
           </>

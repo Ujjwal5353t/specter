@@ -34,6 +34,10 @@ export function resultFromStatus(scanId: string, data: ScanStatusResponse): Scan
 
 // Fast enough that the loader's per-scanner ticks feel live.
 const POLL_INTERVAL_MS = 1500;
+// /run has maxDuration 60, so a scan still 'scanning' after this long was
+// killed without updating its row; stop waiting instead of polling forever.
+const POLL_TIMEOUT_MS = 120_000;
+export const SCAN_TIMEOUT_MESSAGE = 'Scan timed out — the server stopped responding. Retry.';
 
 interface ScanStore {
   scanResult: ScanResult | null;
@@ -42,6 +46,8 @@ interface ScanStore {
   isPolling: boolean;
   isLoading: boolean;
   error: string | null;
+  /** Repo of the scan being polled (from /status); lets the error state offer a retry. */
+  repoUrl: string | null;
   /** Per-scanner state while a scan runs; null before /run reports any. */
   progress: ScannerProgress[] | null;
   setScanResult: (result: ScanResult) => void;
@@ -55,6 +61,9 @@ interface ScanStore {
 }
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
+// Bumped on every start/stop so a response still in flight from an old poll
+// can't write into a newer scan's state.
+let pollToken = 0;
 
 export const useScanStore = create<ScanStore>((set, get) => ({
   scanResult: null,
@@ -63,6 +72,7 @@ export const useScanStore = create<ScanStore>((set, get) => ({
   isPolling: false,
   isLoading: false,
   error: null,
+  repoUrl: null,
   progress: null,
 
   setScanResult: (result) => set({ scanResult: result, isLoading: false }),
@@ -73,19 +83,28 @@ export const useScanStore = create<ScanStore>((set, get) => ({
 
   reset: () => {
     get().stopPolling();
-    set({ scanResult: null, selectedNode: null, sidebarOpen: false, error: null, isLoading: false, progress: null });
+    set({ scanResult: null, selectedNode: null, sidebarOpen: false, error: null, repoUrl: null, isLoading: false, progress: null });
   },
 
   startPolling: (scanId: string) => {
     // Drop any previous scan's result/error so they can't bleed into this one
     get().stopPolling();
-    set({ isPolling: true, scanResult: null, error: null, progress: null, selectedNode: null, sidebarOpen: false });
+    set({ isPolling: true, scanResult: null, error: null, repoUrl: null, progress: null, selectedNode: null, sidebarOpen: false });
+    const token = pollToken;
+    const startedAt = Date.now();
     pollInterval = setInterval(async () => {
+      if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        get().stopPolling();
+        set({ error: SCAN_TIMEOUT_MESSAGE, isLoading: false });
+        return;
+      }
       try {
         const res = await fetch(`/api/scan/${scanId}/status`);
         if (!res.ok) throw new Error('Status check failed');
         const data: ScanStatusResponse = await res.json();
+        if (token !== pollToken) return;
         if (data.progress) set({ progress: data.progress });
+        if (data.scan?.repo_url) set({ repoUrl: data.scan.repo_url });
 
         if (data.scan?.status === 'completed') {
           get().stopPolling();
@@ -95,12 +114,13 @@ export const useScanStore = create<ScanStore>((set, get) => ({
           set({ error: data.scan.error_message ?? 'Scan failed. The repo may be private or the URL is incorrect.', isLoading: false });
         }
       } catch {
-        // keep polling on transient errors
+        // keep polling on transient errors; the timeout above bounds this
       }
     }, POLL_INTERVAL_MS);
   },
 
   stopPolling: () => {
+    pollToken++;
     if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
     set({ isPolling: false });
   },
