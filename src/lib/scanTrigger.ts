@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase';
 
 // Context a monitored scan carries through to /run, so the alert can say
@@ -10,8 +11,38 @@ export interface MonitorContext {
   ref?: string;
 }
 
-export function appOrigin(fallback?: string): string {
-  return fallback || process.env.NEXT_PUBLIC_APP_URL || 'https://specter-seven.vercel.app';
+const isProd = () => process.env.NODE_ENV === 'production';
+
+/**
+ * Shared secret for the start → run hop. Returns null when production has no
+ * INTERNAL_SECRET, so callers fail closed instead of using a public default.
+ * Development keeps a fallback so local runs work without configuration.
+ */
+export function getInternalSecret(): string | null {
+  const secret = process.env.INTERNAL_SECRET;
+  if (secret) return secret;
+  return isProd() ? null : 'specter-internal';
+}
+
+/** Constant-time string compare. Hashing first hides length differences. */
+export function safeEqual(a: string | null | undefined, b: string): boolean {
+  if (typeof a !== 'string') return false;
+  const ha = createHash('sha256').update(a).digest();
+  const hb = createHash('sha256').update(b).digest();
+  return timingSafeEqual(ha, hb);
+}
+
+/**
+ * Origin that /run is called on, which also receives x-internal-secret. The
+ * request's own origin comes from the Host header, so it is attacker-controlled
+ * and only used outside production.
+ */
+export function appOrigin(requestOrigin?: string): string {
+  const configured = process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/+$/, '');
+  if (configured) return configured;
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
+  if (!isProd()) return requestOrigin || 'http://localhost:3000';
+  return 'https://specter-seven.vercel.app';
 }
 
 /**
@@ -24,6 +55,13 @@ export async function createAndRunScan(
   origin: string,
   monitor?: MonitorContext,
 ): Promise<{ scanId: string } | { error: string }> {
+  // Checked before the insert so a misconfigured server leaves no orphan row
+  const internalSecret = getInternalSecret();
+  if (!internalSecret) {
+    console.error('INTERNAL_SECRET is not set in production; refusing to start a scan');
+    return { error: 'Server misconfigured' };
+  }
+
   const normalizedUrl = `https://github.com/${owner}/${repo}`.toLowerCase();
 
   const { data: scan, error } = await supabaseAdmin
@@ -46,7 +84,7 @@ export async function createAndRunScan(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-internal-secret': process.env.INTERNAL_SECRET ?? 'specter-internal',
+        'x-internal-secret': internalSecret,
       },
       body: JSON.stringify({ monitor: monitor ?? null }),
       signal: AbortSignal.timeout(3000),

@@ -107,7 +107,7 @@ const SEV_TIERS: Severity[] = ['critical', 'high', 'medium', 'low'];
 /** Summary of the dependency node picked in the 3D map. */
 function NodeFocusCard({ node, result, onClear }: { node: DepNode; result: ScanResult; onClear: () => void }) {
   const counts = SEV_TIERS
-    .map((sev) => ({ sev, n: node.cves.filter((c) => c.severity === sev).length }))
+    .map((sev) => ({ sev, n: (node.cves ?? []).filter((c) => c.severity === sev).length }))
     .filter((c) => c.n > 0);
 
   // Who pulls this package in; the root means it's a direct dependency.
@@ -120,9 +120,9 @@ function NodeFocusCard({ node, result, onClear }: { node: DepNode; result: ScanR
   const via = parents.filter((p) => !p.isRoot).map((p) => p.name);
 
   // Highest version any advisory lists as fixed: the upgrade that clears the most.
-  const fixes = node.cves.map((c) => c.fixed_in).filter((v): v is string => !!v && !!semver.valid(v));
+  const fixes = (node.cves ?? []).map((c) => c.fixed_in).filter((v): v is string => !!v && !!semver.valid(v));
   const upgradeTo = fixes.length > 0 ? [...fixes].sort(semver.rcompare)[0] : null;
-  const unfixed = node.cves.filter((c) => !c.fixed_in).length;
+  const unfixed = (node.cves ?? []).filter((c) => !c.fixed_in).length;
 
   return (
     <div className="glass-panel rounded-sm p-3 mb-3" style={{ borderColor: 'var(--border-hi)' }}>

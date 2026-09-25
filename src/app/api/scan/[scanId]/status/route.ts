@@ -3,11 +3,29 @@ import { supabaseAdmin } from '@/lib/supabase';
 
 // Must match the TTL /run writes into scan_cache.expires_at.
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+// /run is capped at 60s, so a row still in flight after this long was orphaned.
+const STALE_SCAN_MS = 3 * 60 * 1000;
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ scanId: string }> }) {
   const { scanId } = await params;
   const { data: scan } = await supabaseAdmin.from('scans').select('*').eq('id', scanId).single();
   if (!scan) return NextResponse.json({ error: 'Scan not found' }, { status: 404 });
+
+  // A run that died without updating its row would otherwise read as
+  // 'scanning' forever; report it (and record it) as failed.
+  if (
+    (scan.status === 'scanning' || scan.status === 'pending') &&
+    scan.created_at &&
+    Date.now() - new Date(scan.created_at).getTime() > STALE_SCAN_MS
+  ) {
+    const error_message = 'Scan timed out';
+    try {
+      await supabaseAdmin.from('scans').update({ status: 'failed', error_message }).eq('id', scanId).eq('status', scan.status);
+    } catch {
+      /* best effort: the response below is what the client acts on */
+    }
+    return NextResponse.json({ scan: { ...scan, status: 'failed', error_message }, cache: null, progress: null });
+  }
 
   const [{ data: cache }, { data: progress }] = await Promise.all([
     supabaseAdmin

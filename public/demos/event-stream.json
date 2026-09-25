@@ -27,6 +27,14 @@
             "fixed_in": "0.1.2"
           }
         ],
+        "signals": [
+          {
+            "type": "young_dependency",
+            "severity": "high",
+            "title": "Newly added dependency was brand new",
+            "detail": "flatmap-stream had only just been published when event-stream@3.3.6 started depending on it."
+          }
+        ],
         "ecosystem": "npm"
       },
       {
@@ -111,7 +119,8 @@
       { "from": "stream-combiner@0.0.4", "to": "minimist@0.0.8" },
       { "from": "through@2.3.8", "to": "lodash@4.17.11" }
     ],
-    "vulnCount": 4
+    "vulnCount": 4,
+    "riskCount": 1
   },
   "ghostcommit": {
     "findings": [
