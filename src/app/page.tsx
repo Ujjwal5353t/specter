@@ -1,5 +1,6 @@
 'use client';
 import { useState, useCallback, useEffect, type FormEvent } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useScanStore } from '@/store/scanStore';
 import EcosystemField from '@/components/landing/EcosystemField';
@@ -216,6 +217,7 @@ export default function Home() {
         <nav style={{ display: 'flex', alignItems: 'center', gap: 26, font: `500 11px/1 ${MONO}`, letterSpacing: '.14em' }}>
           <span style={{ color: C.dim }}>v1.0.4</span>
           <a href="#engines" className="entry-navlink" style={navLink}>ENGINES</a>
+          <Link href="/pricing" className="entry-navlink" style={navLink}>PRICING</Link>
 
           <span style={{ position: 'relative' }}>
             <button

@@ -1,0 +1,16 @@
+{
+  "name": "specter-guard",
+  "version": "0.1.0",
+  "description": "Check the lockfile against Specter before `npm install`.",
+  "type": "module",
+  "bin": {
+    "specter-guard": "./specter-guard.mjs"
+  },
+  "files": [
+    "specter-guard.mjs"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}

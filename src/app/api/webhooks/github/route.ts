@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { NextRequest, NextResponse } from 'next/server';
+import { after, NextRequest, NextResponse } from 'next/server';
 import { appOrigin, createAndRunScan } from '@/lib/scanTrigger';
+import { runPullRequestCheck } from '@/lib/packages/prCheck';
 
 export const maxDuration = 60;
 
@@ -37,6 +38,20 @@ function remember(map: Map<string, number>, key: string, now: number) {
   map.set(key, now);
 }
 
+interface PullRequestPayload {
+  action?: string;
+  number?: number;
+  pull_request?: {
+    number?: number;
+    base?: { sha?: string };
+    head?: { sha?: string };
+  };
+  repository?: { name?: string; private?: boolean; owner?: { login?: string } };
+}
+
+// A pull request is only re-checked when it opens or gets new commits
+const PR_ACTIONS = new Set(['opened', 'synchronize']);
+
 interface PushPayload {
   ref?: string;
   after?: string;
@@ -65,6 +80,7 @@ export async function POST(req: NextRequest) {
 
   const event = req.headers.get('x-github-event');
   if (event === 'ping') return NextResponse.json({ ok: true, pong: true });
+  if (event === 'pull_request') return handlePullRequest(rawBody, req.headers.get('x-github-delivery'));
   if (event !== 'push') return NextResponse.json({ ok: true, ignored: `event ${event}` });
 
   let payload: PushPayload;
@@ -118,4 +134,43 @@ export async function POST(req: NextRequest) {
   }
 
   return NextResponse.json({ ok: true, scanId: result.scanId }, { status: 202 });
+}
+
+// Pull request events (pre-install check on lockfile changes). The signature
+// is already verified. The check itself runs after the response, so GitHub's
+// delivery never waits on the registry.
+function handlePullRequest(rawBody: string, deliveryId: string | null) {
+  let payload: PullRequestPayload;
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
+  }
+
+  if (!payload.action || !PR_ACTIONS.has(payload.action)) {
+    return NextResponse.json({ ok: true, ignored: `pull_request ${payload.action}` });
+  }
+  const owner = payload.repository?.owner?.login;
+  const repo = payload.repository?.name;
+  const number = payload.pull_request?.number ?? payload.number;
+  const baseSha = payload.pull_request?.base?.sha;
+  const headSha = payload.pull_request?.head?.sha;
+  if (!owner || !repo || !number || !baseSha || !headSha) {
+    return NextResponse.json({ error: 'Missing pull request fields' }, { status: 400 });
+  }
+  // Same scope as push scanning: public repositories only
+  if (payload.repository?.private) return NextResponse.json({ ok: true, ignored: 'private repository' });
+
+  const now = Date.now();
+  if (deliveryId) {
+    sweep(deliveries, now, DELIVERY_TTL_MS);
+    if (deliveries.has(deliveryId)) return NextResponse.json({ ok: true, skipped: 'duplicate delivery' });
+    remember(deliveries, deliveryId, now);
+  }
+
+  after(async () => {
+    const outcome = await runPullRequestCheck({ owner, repo, number, baseSha, headSha });
+    console.log(`PR check ${owner}/${repo}#${number}: ${outcome}`);
+  });
+  return NextResponse.json({ ok: true, checking: `${owner}/${repo}#${number}` }, { status: 202 });
 }

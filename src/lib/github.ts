@@ -3,6 +3,8 @@ import { Octokit } from '@octokit/rest';
 export const octokit = new Octokit({
   auth: process.env.GITHUB_TOKEN,
   request: { timeout: 10000 },
+  // Optional: GitHub Enterprise, or a local stand-in for GitHub in tests
+  ...(process.env.GITHUB_API_URL ? { baseUrl: process.env.GITHUB_API_URL } : {}),
 });
 
 // HTTP status of an Octokit request error, or undefined for anything else

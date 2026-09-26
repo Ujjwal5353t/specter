@@ -10,6 +10,8 @@ const FRESH_RELEASE_DAYS = 7;
 const YOUNG_PACKAGE_DAYS = 30;
 // A publisher change only means something once the package has a track record
 const MIN_HISTORY_FOR_PUBLISHER_CHECK = 3;
+// ...and stays "new" for this long after their first release of the package
+const RECENT_PUBLISHER_DAYS = 30;
 const INSTALL_HOOKS = ['preinstall', 'install', 'postinstall'];
 
 export interface NpmVersionDoc {
@@ -17,7 +19,7 @@ export interface NpmVersionDoc {
   dependencies?: Record<string, string>;
   scripts?: Record<string, string>;
   _npmUser?: { name?: string; email?: string };
-  dist?: { attestations?: unknown; integrity?: string; shasum?: string };
+  dist?: { attestations?: unknown; integrity?: string; shasum?: string; tarball?: string; unpackedSize?: number };
 }
 
 /** The full registry document for a package (registry.npmjs.org/<name>). */
@@ -84,24 +86,36 @@ export function analyzeVersion(pk: Packument, version: string, now: number): Ver
   const prev = prevVersion ? pk.versions?.[prevVersion] : undefined;
   const label = `${pk.name}@${version}`;
 
-  // 1. First release by someone who never published this package before
+  // 1. Release by a publisher who is new to this package: their first release, or one
+  // within RECENT_PUBLISHER_DAYS of it. Takeovers often ship a harmless release first
+  // to look normal (event-stream 3.3.5), then the payload days later (3.3.6).
   const publisher = doc._npmUser?.name;
   if (publisher && publishedAt !== null && !isTrustedPublisher(doc._npmUser)) {
     const earlier = Object.values(pk.versions ?? {}).filter((d) => {
       const t = parseTime(pk, d.version);
       return t !== null && t < publishedAt;
     });
+    const ownTimes = earlier
+      .filter((d) => d._npmUser?.name === publisher)
+      .map((d) => parseTime(pk, d.version) as number);
+    // When this publisher first appeared: their earliest release, or now if this is it
+    const arrivedAt = ownTimes.length > 0 ? Math.min(...ownTimes) : publishedAt;
+    const historyBefore = earlier.filter((d) => (parseTime(pk, d.version) as number) < arrivedAt).length;
     if (
-      earlier.length >= MIN_HISTORY_FOR_PUBLISHER_CHECK &&
-      !earlier.some((d) => d._npmUser?.name === publisher)
+      historyBefore >= MIN_HISTORY_FOR_PUBLISHER_CHECK &&
+      publishedAt - arrivedAt < RECENT_PUBLISHER_DAYS * DAY_MS
     ) {
+      const isFirst = ownTimes.length === 0;
       const prevPublisher = prev?._npmUser?.name;
       signals.push({
         type: 'new_publisher',
         severity: 'low',
-        title: 'First release by a new publisher',
-        detail: `${label} was published by "${publisher}", who never published any of the ${earlier.length} earlier versions` +
-          (prevPublisher ? ` (previous release was by "${prevPublisher}").` : '.'),
+        title: isFirst ? 'First release by a new publisher' : 'Release by a recently arrived publisher',
+        detail: isFirst
+          ? `${label} was published by "${publisher}", who never published any of the ${earlier.length} earlier versions` +
+            (prevPublisher ? ` (previous release was by "${prevPublisher}").` : '.')
+          : `${label} was published by "${publisher}", whose first release of ${pk.name} was only ` +
+            `${ageText(publishedAt - arrivedAt)} earlier, after ${historyBefore} releases by others.`,
       });
     }
   }
