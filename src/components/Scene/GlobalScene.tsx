@@ -7,9 +7,9 @@ const SpectreScene = dynamic(() => import('./SpectreScene'), { ssr: false });
 
 export default function GlobalScene() {
   const pathname = usePathname();
-  // The landing page draws its own ecosystem field and paints an opaque
-  // background over this layer, so mounting the WebGL scene there would
-  // render nothing while still costing a render loop. Scan pages are unchanged.
-  if (pathname === '/') return null;
+  // The landing and pricing pages paint an opaque background over this layer,
+  // so mounting the WebGL scene there would render nothing while still costing
+  // a render loop. Scan pages are unchanged.
+  if (pathname === '/' || pathname === '/pricing') return null;
   return <SpectreScene />;
 }
