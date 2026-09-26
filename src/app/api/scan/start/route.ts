@@ -16,7 +16,7 @@ export async function POST(req: NextRequest) {
   // Leftmost entry is the original client; the rest are proxies
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
   if (!rateLimit(ip)) {
-    return NextResponse.json({ error: 'Rate limit: 5 scans per hour' }, { status: 429 });
+    return NextResponse.json({ error: 'Rate limit: 15 scans per hour' }, { status: 429 });
   }
 
   const body = await req.json().catch(() => ({}));
