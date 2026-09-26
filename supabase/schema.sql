@@ -81,6 +81,9 @@ create table if not exists public.package_verdicts (
   primary key (name, version, integrity)
 );
 
+-- LLM review of the diff (#43): { status, malicious, reasons, model, ... } or a recorded failure.
+alter table public.package_verdicts add column if not exists review jsonb;
+
 -- The app only talks to Supabase from the server with the secret key, which bypasses RLS.
 -- Enabling RLS with no policies blocks anyone using the publishable key from reading these tables.
 alter table public.scans      enable row level security;

@@ -1,4 +1,5 @@
 import { analyzePackage, type PackageVerdict, type Verdict } from './analyze';
+import type { LlmReview } from './review';
 import type { LockfilePackage } from './lockfile';
 
 /**
@@ -33,6 +34,8 @@ export interface PackageCheck {
   verdict: CheckVerdict;
   score: number | null;
   signals: ApiSignal[];
+  /** The LLM's read of the diff, or its recorded failure. Absent when that step did not run. */
+  review?: LlmReview;
   analyzedAt: string | null;
 }
 
@@ -80,7 +83,7 @@ function toCheck(v: PackageVerdict): Mapped {
   }
   return {
     kind: 'ok',
-    check: { name: v.name, version: v.version, verdict, score, signals, analyzedAt: v.analyzedAt },
+    check: { name: v.name, version: v.version, verdict, score, signals, ...(v.review ? { review: v.review } : {}), analyzedAt: v.analyzedAt },
   };
 }
 

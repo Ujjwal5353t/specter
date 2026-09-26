@@ -194,6 +194,8 @@ function printReport(report, log) {
       const id = s.advisoryId && !s.title.includes(s.advisoryId) ? dim(` (${s.advisoryId})`) : '';
       log(`         ${dim(`[${s.severity}]`)} ${s.title}${id}`);
     }
+    if (p.review?.status === 'ok') log(`         ${dim(`LLM review: ${p.review.malicious}`)}`);
+    else if (p.review?.status === 'failed') log(`         ${dim('LLM review failed; verdict based on the other checks')}`);
   }
   if (report.counts.pending > 0) log(`  ${yellow('?')} ${report.counts.pending} package(s) could not be analyzed in time and are unchecked.`);
   if (report.skipped > 0) log(dim(`  ${report.skipped} lockfile entr${report.skipped === 1 ? 'y' : 'ies'} skipped (workspace links, git or private-registry sources).`));

@@ -293,6 +293,7 @@ export default function DocsPage() {
                   [mk('verdict'), 'string', 'One of allow, warn, block or pending.'],
                   [mk('score'), 'number | null', 'Sum of the signal weights. null while pending. See Scoring.'],
                   [mk('signals'), 'array', 'Why: each has type, severity, title, detail and, for advisories, advisoryId. See the glossary.'],
+                  [mk('review'), 'object', 'Only for flagged versions whose changed code was reviewed by an LLM (a tiebreaker, never the sole reason to block). status is ok, with malicious (likely, possible or unlikely), reasons, suspiciousSnippets and model, or failed, with error. An unlikely review can lower a warn to an allow (loweredVerdict) unless a malicious-package advisory exists, a source failed, or the package text tried to instruct the reviewer (injectionSuspected). Absent when no AI key is configured.'],
                   [mk('analyzedAt'), 'string | null', 'ISO time the verdict was produced. Verdicts are cached for 6 hours.'],
                   [mk('retryAfterSeconds'), 'number', 'Only on a 202 pending response: how long to wait before repeating the request.'],
                 ]}
