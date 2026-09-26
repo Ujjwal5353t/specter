@@ -81,6 +81,9 @@ create table if not exists public.package_verdicts (
   primary key (name, version, integrity)
 );
 
+-- LLM review of the diff (#43): { status, malicious, reasons, model, ... } or a recorded failure.
+alter table public.package_verdicts add column if not exists review jsonb;
+
 -- Triage state for exposed secrets (console Secrets view → MARK RESOLVED).
 -- Keyed per repo + finding fingerprint so a resolution survives rescans.
 create table if not exists public.finding_triage (
