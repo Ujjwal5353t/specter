@@ -53,8 +53,8 @@ export { isValidPackageName, isValidVersion } from './validate';
 type Mapped = { kind: 'ok'; check: PackageCheck } | { kind: 'not_found' };
 
 /**
- * An `allow` that rests on a source that could not be reached is not an
- * `allow`: it becomes a `warn` that says why, so an outage never reads as clean.
+ * A verdict that rests on a source that could not be reached is never an
+ * `allow`: it is a `warn` that says why, so an outage never reads as clean.
  */
 function toCheck(v: PackageVerdict): Mapped {
   const signals: ApiSignal[] = v.signals.map((s) => ({
@@ -64,8 +64,11 @@ function toCheck(v: PackageVerdict): Mapped {
   let verdict: Verdict = v.verdict;
   let score = v.score;
 
-  if (verdict === 'allow' && v.sourceFailures.length > 0) {
-    if (v.sourceFailures.includes('version_not_found')) return { kind: 'not_found' };
+  // analyzePackage already turns any failed source into `warn`; what is added
+  // here is the reason, so the caller sees why. A version the registry lacks and
+  // no advisory covers is a plain not-found rather than a warning.
+  if (v.sourceFailures.includes('version-not-found') && v.signals.length === 0) return { kind: 'not_found' };
+  if (verdict !== 'block' && v.sourceFailures.length > 0) {
     verdict = 'warn';
     score = Math.max(score, 4);
     signals.push({

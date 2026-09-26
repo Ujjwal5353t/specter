@@ -1,8 +1,11 @@
+import semver from 'semver';
 import type { Severity } from '@/types';
 import { supabaseAdmin } from '@/lib/supabase';
+import { PACKAGE_NAME, createLimiter, fetchPackument, checkTyposquat } from '@/lib/npm/registry';
+import { runDiffTier } from './diff';
 import {
-  analyzeVersion, typosquatMatch, youngDependencySignal,
-  type Packument, type NpmVersionDoc,
+  analyzeVersion, youngDependencySignal,
+  type NpmVersionDoc,
 } from '@/lib/scanners/deprisk';
 
 /**
@@ -11,27 +14,37 @@ import {
  * and OSV — no GitHub API calls, no repository access, so it can run before
  * anything is ever cloned or installed.
  *
- * This is the "metadata" tier only. Later tiers (tarball diff, LLM review,
- * sandbox — #39/#43/#45) are separate, bigger pieces of work; a `warn` or
- * `block` verdict here is exactly the trigger they'd escalate on — see
- * needsEscalation() below, which is that rule as a concrete, importable
- * check rather than each future tier re-deriving it from the verdict.
+ * Tier 1 is registry metadata + OSV. A version that scores at or above the warn
+ * threshold is escalated to tier 2, the tarball diff (diff.ts): its files are
+ * compared with the previous version's and scanned as text, never executed.
+ * The LLM review and sandbox tiers (#43/#45) will hang off the same rule, see
+ * needsEscalation() below.
+ *
+ * CACHING. Published npm versions are immutable, so a verdict is looked up by
+ * (name, version) *before* any network call: a repeat call is one DB read. A
+ * caller that has an integrity hash (a lockfile does) can pass it; a cached
+ * verdict for a different tarball is then not reused. Only complete verdicts
+ * are cached, so a cache hit never hides a source that failed.
  */
 
-const REGISTRY_BASE = 'https://registry.npmjs.org';
 const OSV_QUERY_API = 'https://api.osv.dev/v1/query';
 const FETCH_TIMEOUT_MS = 8000;
 // A cached verdict is re-derived after this long: OSV `MAL-` advisories are
 // usually published after a malicious version is already live, so an old
 // `allow` must not be trusted forever.
 const VERDICT_TTL_MS = 6 * 60 * 60 * 1000;
+// A release adding more dependencies than this is off the normal path; the rest go unchecked
+const MAX_NEW_DEPS_CHECKED = 10;
+const REGISTRY_CONCURRENCY = 6;
 
 export type Verdict = 'allow' | 'warn' | 'block';
 
 export type VerdictSignalType =
   | 'new_publisher' | 'new_dependency' | 'young_dependency' | 'young_package'
   | 'fresh_release' | 'install_script' | 'provenance_dropped' | 'typosquat'
-  | 'osv_malicious' | 'osv_advisory';
+  | 'osv_malicious' | 'osv_advisory'
+  // Tarball-diff tier (#39)
+  | 'diff_rule' | 'diff_install_script' | 'diff_new_files' | 'diff_skipped' | 'archive_anomaly';
 
 export interface VerdictSignal {
   type: VerdictSignalType;
@@ -40,6 +53,8 @@ export interface VerdictSignal {
   detail: string;
   /** OSV/GHSA/MAL- id, for the two signal types that come from an OSV advisory. */
   advisoryId?: string;
+  /** Id of the static rule behind a 'diff_rule' signal (see rules.ts). */
+  rule?: string;
 }
 
 export interface PackageVerdict {
@@ -50,15 +65,15 @@ export interface PackageVerdict {
   verdict: Verdict;
   score: number;
   signals: VerdictSignal[];
-  tierReached: 'metadata';
+  /** How far the analysis went: registry metadata + OSV, or also the tarball diff. */
+  tierReached: 'metadata' | 'diff';
   analyzedAt: string;
   /** True when this came from package_verdicts instead of a fresh analysis. */
   fromCache: boolean;
   /**
-   * Signal sources that could not be reached (e.g. 'registry', 'osv'), plus
-   * 'version_not_found' when the registry answered but has no such version.
-   * Their signals are simply absent, not treated as "clean" — check this
-   * before trusting an 'allow' verdict.
+   * Sources that could not be checked: 'registry', 'osv', 'registry:<dep>' for a new
+   * dependency, 'version-not-found', 'invalid-input'. Their signals are absent, not
+   * "clean", so a verdict with failures is never `allow` (see analyzePackage).
    */
   sourceFailures: string[];
 }
@@ -68,9 +83,11 @@ export interface PackageVerdict {
 // Same ordinal weights as the repo scan's calcThreatScore (README: "How the
 // threat score works"), for one consistent scale across the app:
 //   critical 15 · high 8 · medium 4 · low 1 · info 0
-// `score` is the sum of every signal's weight (OSV advisories other than a
-// malicious-package match are capped to the 3 most severe, so a package with
-// a long CVE list can't inflate the score past what a human would weigh it).
+// `score` is the sum of every signal's weight, except OSV advisories that are
+// not malicious-package matches: those are ordinary CVEs ("vulnerable", not
+// "malicious"), so together they add at most MAX_ADVISORY_SCORE. A popular
+// package with a long CVE list therefore stays `allow` on its own, while a
+// CVE still counts when it stacks with real supply-chain signals.
 //
 // Thresholds are hand-picked, not statistical, exactly like calcThreatScore:
 //   score ≥ 23  → block  (needs real stacking: e.g. one critical + one high,
@@ -81,33 +98,29 @@ export interface PackageVerdict {
 // tagged CWE-506 "Embedded Malicious Code") forces `block` outright,
 // regardless of score — that is not a heuristic, it is a direct report of
 // known-malicious code.
+// A verdict that would be `allow` but had a source fail is `warn` instead: a
+// package that could not be fully checked is not one we can vouch for.
 const SEVERITY_WEIGHT: Record<Severity, number> = { critical: 15, high: 8, medium: 4, low: 1, info: 0 };
 const BLOCK_SCORE = 23;
 const WARN_SCORE = 8;
 const MAX_SCORED_ADVISORIES = 3;
+const MAX_ADVISORY_SCORE = SEVERITY_WEIGHT.medium;
 
 function scoreOf(signals: VerdictSignal[]): number {
-  return signals.reduce((sum, s) => sum + SEVERITY_WEIGHT[s.severity], 0);
+  let score = 0;
+  let advisories = 0;
+  for (const s of signals) {
+    if (s.type === 'osv_advisory') advisories += SEVERITY_WEIGHT[s.severity];
+    else score += SEVERITY_WEIGHT[s.severity];
+  }
+  return score + Math.min(advisories, MAX_ADVISORY_SCORE);
 }
 
-function verdictFor(signals: VerdictSignal[], score: number): Verdict {
+function verdictFor(signals: VerdictSignal[], score: number, failures: string[]): Verdict {
   if (signals.some((s) => s.type === 'osv_malicious')) return 'block';
   if (score >= BLOCK_SCORE) return 'block';
-  if (score >= WARN_SCORE) return 'warn';
+  if (score >= WARN_SCORE || failures.length > 0) return 'warn';
   return 'allow';
-}
-
-// ── npm registry ─────────────────────────────────────────────────────────
-
-/** Self-contained on purpose (see module doc): no import of DepChain/GitHub code. */
-async function fetchPackument(name: string): Promise<Packument | null> {
-  try {
-    const res = await fetch(`${REGISTRY_BASE}/${encodeURIComponent(name)}`, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-    if (!res.ok) return null;
-    return (await res.json()) as Packument;
-  } catch {
-    return null;
-  }
 }
 
 function integrityOf(doc: NpmVersionDoc | undefined): string {
@@ -199,23 +212,25 @@ function rowToVerdict(row: {
   return {
     name: row.name, version: row.version, integrity: row.integrity,
     verdict: row.verdict, score: row.score, signals: row.signals,
-    tierReached: 'metadata', analyzedAt: row.analyzed_at,
+    tierReached: row.tier_reached === 'diff' ? 'diff' : 'metadata', analyzedAt: row.analyzed_at,
+    // Only complete verdicts are ever written, so a cached one had no failed source
     fromCache: true, sourceFailures: [],
   };
 }
 
-async function readCache(name: string, version: string, integrity: string): Promise<PackageVerdict | null> {
+async function readCache(name: string, version: string, integrity?: string): Promise<PackageVerdict | null> {
   try {
     // A miss and a real failure (table not migrated yet, Supabase down) are
     // deliberately treated the same: both just mean "compute a fresh verdict".
-    const { data, error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from('package_verdicts')
       .select('*')
-      .eq('name', name).eq('version', version).eq('integrity', integrity)
-      .maybeSingle();
-    if (error || !data) return null;
-    if (Date.now() - Date.parse(data.analyzed_at) > VERDICT_TTL_MS) return null;
-    return rowToVerdict(data);
+      .eq('name', name).eq('version', version);
+    if (integrity) query = query.eq('integrity', integrity);
+    const { data, error } = await query.order('analyzed_at', { ascending: false }).limit(1);
+    if (error || !data || data.length === 0) return null;
+    if (Date.now() - Date.parse(data[0].analyzed_at) > VERDICT_TTL_MS) return null;
+    return rowToVerdict(data[0]);
   } catch {
     return null;
   }
@@ -241,12 +256,6 @@ async function writeCache(v: PackageVerdict): Promise<void> {
 // ── Entry point ──────────────────────────────────────────────────────────
 
 /**
- * Verdict for one npm `name@version`. Never throws: a source that fails
- * (registry down, OSV down, Supabase not migrated) is recorded in
- * `sourceFailures` and simply contributes no signals, rather than failing
- * the whole check or being counted as "clean".
- */
-/**
  * Escalation rule (#27 scope): only a version that scored above the `allow`
  * threshold here is worth the cost of the diff, LLM and sandbox tiers
  * (#39/#43/#45). Those tiers don't exist yet — this is the hook they'll
@@ -257,93 +266,111 @@ export function needsEscalation(v: PackageVerdict): boolean {
   return v.verdict !== 'allow';
 }
 
+/** Verdict for input that never reached a data source. */
+function unchecked(name: string, version: string, failure: string): PackageVerdict {
+  return {
+    name, version, integrity: '',
+    verdict: 'warn', score: 0, signals: [], tierReached: 'metadata',
+    analyzedAt: new Date().toISOString(),
+    fromCache: false, sourceFailures: [failure],
+  };
+}
+
+/**
+ * Verdict for one exact npm `name@version`. Never throws: a source that fails
+ * (registry down, OSV down, Supabase not migrated) is recorded in
+ * `sourceFailures` and simply contributes no signals, rather than failing
+ * the whole check or being counted as "clean". `integrity` is the lockfile's
+ * hash for this version, when the caller has one.
+ */
 export async function analyzePackage(
   name: string,
   version: string,
-  opts: { integrity?: string } = {},
+  options: { integrity?: string } = {},
 ): Promise<PackageVerdict> {
-  const sourceFailures: string[] = [];
-
-  // A caller that already knows the integrity (a lockfile records it) gets a
-  // cache hit with no registry call at all. It is only used to *read*: what is
-  // written below always comes from the registry, so a forged value can at
-  // worst match a verdict for the same bytes.
-  if (opts.integrity) {
-    const hit = await readCache(name, version, opts.integrity);
-    if (hit) return hit;
+  if (!PACKAGE_NAME.test(name) || semver.valid(version) !== version) {
+    return unchecked(name, version, 'invalid-input');
   }
 
-  // Otherwise the cache key needs the exact-version integrity, which only the
-  // registry has — so a first packument fetch happens even on a cache hit.
-  // It's the OSV call (the slower, rate-limited one) that a hit skips.
-  const pk = await fetchPackument(name);
-  if (!pk) sourceFailures.push('registry');
-  const doc = pk?.versions?.[version];
-  // Registry reachable but no such version (never existed, or unpublished —
-  // OSV can still know about it, so this is a marker, not an early return).
-  if (pk && !doc) sourceFailures.push('version_not_found');
-  const integrity = integrityOf(doc);
+  try {
+    const cached = await readCache(name, version, options.integrity);
+    if (cached) return cached;
 
-  if (integrity !== opts.integrity) {
-    const cached = await readCache(name, version, integrity);
-    if (cached) return { ...cached, sourceFailures };
-  }
+    const label = `${name}@${version}`;
+    const sourceFailures: string[] = [];
+    const signals: VerdictSignal[] = [];
+    const now = Date.now();
+    const limit = createLimiter(REGISTRY_CONCURRENCY);
 
-  const now = Date.now();
-  const signals: VerdictSignal[] = [];
+    // OSV needs no registry data, so it runs alongside the registry work. A
+    // version npm has since removed (event-stream@3.3.6) is still known to OSV.
+    const osvPromise = fetchOSVVulns(name, version);
 
-  if (pk) {
-    const analysis = analyzeVersion(pk, version, now);
-    signals.push(...(analysis.signals as VerdictSignal[]));
+    const pk = await fetchPackument(name);
+    const doc = pk?.versions?.[version];
+    if (!pk) sourceFailures.push('registry');
+    else if (!doc) sourceFailures.push('version-not-found');
 
-    // New dependencies this version added, each checked for its own age —
-    // the exact shape of the event-stream/flatmap-stream attack: a brand-new
-    // package slipped in as a dependency of an already-trusted one.
-    if (analysis.newDeps.length > 0 && analysis.publishedAt !== null) {
-      const publishedAt = analysis.publishedAt;
-      const parent = { name, publisher: doc?._npmUser?.name };
-      const depResults = await Promise.allSettled(
-        analysis.newDeps.map(async (depName) => {
-          const depPk = await fetchPackument(depName);
-          if (!depPk) return null;
-          return youngDependencySignal(depPk, `${name}@${version}`, publishedAt, parent);
-        }),
-      );
-      for (const r of depResults) {
-        if (r.status === 'fulfilled' && r.value) signals.push(r.value as VerdictSignal);
+    if (pk && doc) {
+      const analysis = analyzeVersion(pk, version, now);
+      signals.push(...(analysis.signals as VerdictSignal[]));
+
+      // New dependencies this version added, each checked for its own age —
+      // the exact shape of the event-stream/flatmap-stream attack: a brand-new
+      // package slipped in as a dependency of an already-trusted one.
+      if (analysis.newDeps.length > 0 && analysis.publishedAt !== null) {
+        const publishedAt = analysis.publishedAt;
+        const parent = { name, publisher: doc._npmUser?.name };
+        await Promise.all(analysis.newDeps.slice(0, MAX_NEW_DEPS_CHECKED).map((dep) => limit(async () => {
+          const depPk = await fetchPackument(dep);
+          if (!depPk) {
+            sourceFailures.push(`registry:${dep}`);
+            return;
+          }
+          const signal = youngDependencySignal(depPk, label, publishedAt, parent);
+          if (signal) signals.push(signal as VerdictSignal);
+        })));
       }
     }
+
+    // Checks the package's download count too, so a small legitimate package
+    // with a similar name isn't called a typosquat on spelling alone
+    const typosquat = await checkTyposquat(name).catch(() => null);
+    if (typosquat) signals.push(typosquat as VerdictSignal);
+
+    const vulns = await osvPromise;
+    if (vulns === null) sourceFailures.push('osv');
+    else signals.push(...osvSignals(vulns));
+
+    // Tier 2, the tarball diff, only for versions the metadata tier already
+    // flagged. A confirmed-malicious version needs no further proof, and one npm
+    // no longer serves has no tarball to read.
+    let tierReached: PackageVerdict['tierReached'] = 'metadata';
+    if (pk && doc && scoreOf(signals) >= WARN_SCORE && !signals.some((s) => s.type === 'osv_malicious')) {
+      const diff = await runDiffTier(pk, version);
+      signals.push(...diff.signals);
+      if (diff.failure) sourceFailures.push(diff.failure);
+      if (diff.reached) tierReached = 'diff';
+    }
+
+    // Strongest evidence first, so the reasons behind a verdict read well
+    signals.sort((a, b) => SEVERITY_WEIGHT[b.severity] - SEVERITY_WEIGHT[a.severity]);
+    const score = scoreOf(signals);
+    const verdict: PackageVerdict = {
+      name, version, integrity: integrityOf(doc),
+      verdict: verdictFor(signals, score, sourceFailures),
+      score, signals, tierReached,
+      analyzedAt: new Date(now).toISOString(),
+      fromCache: false, sourceFailures,
+    };
+
+    // Only a complete verdict is cached: one built without a source could
+    // under-report, and a cache hit would hide that. A removed version is left
+    // uncached too, in case it is (re)published later.
+    if (sourceFailures.length === 0) await writeCache(verdict);
+
+    return verdict;
+  } catch (err) {
+    return unchecked(name, version, `analysis-error: ${err instanceof Error ? err.message : String(err)}`);
   }
-
-  const typosquat = typosquatMatch(name);
-  if (typosquat) {
-    signals.push({
-      type: 'typosquat',
-      severity: 'high',
-      title: `Possible typosquat of "${typosquat.target}"`,
-      detail: `"${name}" ${typosquat.exact ? 'differs from' : 'is one typo away from'} the popular package "${typosquat.target}".`,
-    });
-  }
-
-  const vulns = await fetchOSVVulns(name, version);
-  if (vulns === null) sourceFailures.push('osv');
-  else signals.push(...osvSignals(vulns));
-
-  const score = scoreOf(signals);
-  const verdict: PackageVerdict = {
-    name, version, integrity,
-    verdict: verdictFor(signals, score),
-    score, signals, tierReached: 'metadata',
-    analyzedAt: new Date(now).toISOString(),
-    fromCache: false, sourceFailures,
-  };
-
-  // Only a complete verdict is cached. A partial one (OSV or the registry was
-  // unreachable) would otherwise be served later as a clean `allow` with its
-  // sourceFailures lost. Awaited: on serverless the function can be frozen the
-  // moment the response is sent, which would silently drop a fire-and-forget
-  // write and make every repeat call a full re-analysis.
-  if (sourceFailures.length === 0) await writeCache(verdict);
-
-  return verdict;
 }
