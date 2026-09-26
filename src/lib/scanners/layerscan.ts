@@ -3,7 +3,7 @@ import type { DockerFinding } from '@/types';
 
 interface Instruction { instr: string; args: string; line: number; }
 
-function parseDockerfile(content: string): Instruction[] {
+export function parseDockerfile(content: string): Instruction[] {
   const result: Instruction[] = [];
   let buf = '';
   content.split('\n').forEach((raw, i) => {
@@ -21,7 +21,7 @@ function parseDockerfile(content: string): Instruction[] {
 }
 
 const DANGEROUS_PORTS = new Set(['22','23','3306','5432','27017','6379','9200','2375','2376','8080']);
-const SECRET_RE = /password|secret|key|token|credential|auth|pwd|apikey/i;
+export const SECRET_RE = /password|secret|key|token|credential|auth|pwd|apikey/i;
 
 export async function runLayerScan(owner: string, repo: string) {
   const candidates = ['Dockerfile', 'dockerfile', 'Dockerfile.prod', 'docker/Dockerfile', 'deploy/Dockerfile'];

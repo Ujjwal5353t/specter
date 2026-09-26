@@ -354,3 +354,89 @@ html, body, #__next {
 @media (prefers-reduced-motion: reduce) {
   .sc-radar, .sc-e-t, .sc-live, .sc-caret, .sc-nd, .sc-row { animation: none; }
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+   SPECTER console shell + module views (components/console/*)
+   Design references: html/SPECTER/03–11 (Hud, Rail and each module artboard).
+   All `sx-*` names are scoped to the console.
+   ══════════════════════════════════════════════════════════════════════ */
+
+:root { --sx-hud: 44px; --sx-rail: 64px; }
+@media (max-width: 767px) { :root { --sx-rail: 0px; } }
+
+/* 3D scene sits in the content area, under the HUD and beside the rail. */
+.sx-scene { position: absolute; top: var(--sx-hud); left: var(--sx-rail); right: 0; bottom: 0; z-index: 0; pointer-events: auto; }
+.sx-content { position: absolute; top: var(--sx-hud); left: var(--sx-rail); right: 0; bottom: 0; z-index: 10; }
+.sx-content--map { pointer-events: none; overflow: hidden; }
+/* The threat map page sizes itself to the viewport (h-screen); inside the
+   shell it fills the content area instead. Its own layout is unchanged. */
+.sx-content--map > main { height: 100% !important; }
+.sx-content--view { pointer-events: auto; overflow: auto; background: #03060B; scrollbar-width: thin; scrollbar-color: #1A2738 transparent; }
+
+.sx-root, .sx-root * { box-sizing: border-box; }
+.sx-root { font-family: 'Archivo Variable', 'Archivo', ui-sans-serif, system-ui, sans-serif; color: #D5E1EC; }
+.sx-root button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+.sx-root button:disabled { cursor: not-allowed; }
+.sx-root a { color: #4FD8F0; text-decoration: none; }
+.sx-root a:hover { color: #8BE9FA; }
+.sx-root :focus-visible { outline: 1px solid #4FD8F0; outline-offset: 2px; }
+
+.sx-ri:hover { background: #08101A; }
+.sx-tr { transition: background .15s ease; }
+.sx-tr:hover { background: #08101A !important; }
+.sx-act { transition: border-color .18s ease, color .18s ease; }
+.sx-act:hover:not(:disabled) { border-color: #2A4966 !important; color: #E9F0F7 !important; }
+.sx-primary { transition: filter .18s ease; }
+.sx-primary:hover:not(:disabled) { filter: brightness(1.12); }
+.sx-primary:disabled, .sx-act:disabled { opacity: .45; }
+.sx-scroll { overflow-y: auto; scrollbar-width: thin; scrollbar-color: #1A2738 transparent; }
+.sx-trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.sx-live { animation: sx-blink 1.8s ease-in-out infinite; }
+@keyframes sx-blink { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+.sx-pulse { animation: sx-pulse 2.2s ease-in-out infinite; }
+@keyframes sx-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,61,79,.6); } 50% { box-shadow: 0 0 0 6px rgba(255,61,79,0); } }
+.sx-ghost { animation: sx-ghost 3s ease-in-out infinite; }
+@keyframes sx-ghost { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,61,79,.5), 0 0 14px 4px rgba(255,61,79,.45); } 50% { box-shadow: 0 0 0 9px rgba(255,61,79,0), 0 0 22px 6px rgba(255,61,79,.55); } }
+.sx-flow { stroke-dasharray: 5 5; animation: sx-dash 1s linear infinite; }
+.sx-trail { stroke-dasharray: 3 6; animation: sx-dash18 1.4s linear infinite; }
+@keyframes sx-dash { to { stroke-dashoffset: -10; } }
+@keyframes sx-dash18 { to { stroke-dashoffset: -18; } }
+.sx-spulse { animation: sx-spulse 2.2s ease-in-out infinite; }
+@keyframes sx-spulse { 0%, 100% { opacity: .25; } 50% { opacity: .7; } }
+.sx-hot { animation: sx-hot 2.4s ease-in-out infinite; }
+@keyframes sx-hot { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+.sx-beam { animation: sx-beam 5s ease-in-out infinite; }
+@keyframes sx-beam { 0% { transform: translateY(100%); opacity: 0; } 10% { opacity: 1; } 85% { opacity: 1; } 100% { transform: translateY(0); opacity: 0; } }
+.sx-perim { animation: sx-rot 60s linear infinite; transform-box: fill-box; transform-origin: center; }
+@keyframes sx-rot { to { transform: rotate(360deg); } }
+.sx-ed-bad { stroke-dasharray: 9 6; animation: sx-dash15 .7s linear infinite; }
+@keyframes sx-dash15 { to { stroke-dashoffset: -15; } }
+.sx-hb { stroke-dasharray: 400; animation: sx-hb 3s linear infinite; }
+@keyframes sx-hb { from { stroke-dashoffset: 400; } to { stroke-dashoffset: 0; } }
+.sx-alert { animation: sx-al 1.6s ease-in-out infinite; }
+@keyframes sx-al { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,61,79,.6); } 50% { box-shadow: 0 0 0 5px rgba(255,61,79,0); } }
+.sx-fade { animation: sx-fade .35s ease-out; }
+@keyframes sx-fade { from { opacity: 0; transform: translateY(3px); } }
+
+/* Split layouts: a working area and a detail aside that stack on narrow screens. */
+.sx-split { display: flex; min-height: 100%; }
+.sx-split > .sx-main { flex: 1 1 auto; min-width: 0; }
+.sx-split > .sx-aside { flex: 0 0 auto; background: #04080D; border-left: 1px solid #101B29; }
+@media (max-width: 1180px) {
+  .sx-split { flex-direction: column; }
+  .sx-split > .sx-aside { width: auto !important; border-left: 0; border-top: 1px solid #101B29; }
+  .sx-hide-md { display: none !important; }
+}
+@media (max-width: 1320px) { .sx-hide-lg { display: none !important; } }
+@media (max-width: 767px) {
+  .sx-hide-sm { display: none !important; }
+  .sx-pad { padding-left: 16px !important; padding-right: 16px !important; }
+}
+.sx-table-wrap { width: 100%; overflow-x: auto; scrollbar-width: thin; scrollbar-color: #1A2738 transparent; }
+.sx-grid-cells { display: grid; }
+@media (max-width: 767px) { .sx-grid-cells { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .sx-live, .sx-pulse, .sx-ghost, .sx-flow, .sx-trail, .sx-spulse, .sx-hot, .sx-beam, .sx-perim, .sx-ed-bad, .sx-hb, .sx-alert, .sx-fade { animation: none; }
+}
