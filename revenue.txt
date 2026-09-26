@@ -1,0 +1,68 @@
+SPECTER - PITCH AND REVENUE (short version)
+
+THE PROBLEM
+Most tools tell you a package was bad AFTER you installed it. By then the
+malware is already on your machine.
+
+OUR ANSWER
+Check the npm package BEFORE it is installed. We give every package version a
+verdict (allow / warn / block) and stop the install if it is bad.
+
+WHAT WE HAVE TODAY (built)
+- Scan any GitHub repo with 5 scanners (dependencies, secrets in commits,
+  Docker, API routes, env files) and a 0-100 threat score
+- 3D scene, AI explanation, PDF report
+- Package risk signals from the npm registry (new maintainer, new dependency,
+  install script, lost provenance, typosquat)
+- Auto-monitoring of repos with Telegram alerts
+- Demo scans of two real attacks (event-stream, node-ipc)
+
+WHAT WE ARE ADDING (planned, tracked on GitHub, epic #25, npm only)
+Core:
+- Verdict for any npm package version                 #27, #28
+- Check API + docs page                               #31, #32
+- Command line tool that checks before install        #35
+- Pricing page                                        #33
+- Test numbers (bad ones caught, good ones wrongly
+  flagged)                                            #26
+Add-ons:
+- Compare new version vs old version (catches
+  attacks that metadata alone cannot)                 #39
+- AI review of suspicious changes                     #43
+- Wait period for brand-new versions + allow list     #42
+- Watch new npm releases on a schedule                #41
+- PR check on GitHub                                  #36
+- Sandbox: run the package in a locked Docker box
+  with fake passwords and see what it does            #45
+
+WHAT IS FREE AND WHAT IS PAID (the plan; prices are proposals)
+FREE (this is what the hackathon builds)
+- Check public npm packages (limited per IP)
+- Command line tool, docs, repo scan, 3D scene
+TEAM  (about $19 per developer per month) - ROADMAP
+- PR check on private repos, block mode
+- Wait-period rules
+- Sandbox and AI review reports
+ENTERPRISE  (custom price) - ROADMAP
+- Registry proxy that blocks bad packages for a whole company
+- Private package analysis, SSO, SLA
+THREAT FEED  (custom price, for security companies) - ROADMAP
+- Live stream of malicious package versions
+
+There is no login, payment, or API key system in the hackathon version.
+The paid tiers are the business plan, shown on the pricing page.
+
+WHY THE MONEY WORKS
+- We check a package version once and share the answer with every customer,
+  so extra customers cost us almost nothing.
+- Expensive checks (sandbox, AI) only run on the few percent that look
+  suspicious, so cost stays low.
+- Customers pay for speed (verdict before anyone else), fewer false alarms,
+  and enforcement (blocking), not for a plain lookup.
+
+HONEST LIMITS
+- A verdict is a risk signal, not a guarantee.
+- Determined attackers can sometimes fool a sandbox, so it is one layer.
+- A false alarm can break a build, so blocking is opt-in.
+- Free tools exist (OpenSSF, GuardDog); we must win on speed and accuracy.
+- npm only.

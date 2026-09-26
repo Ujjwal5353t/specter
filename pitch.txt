@@ -1,0 +1,55 @@
+SPECTER - PITCH (short)
+
+THE PROBLEM
+- Most tools flag a bad npm package AFTER it is installed. By then the malware has run.
+- Attacks like event-stream (8M+ downloads) and node-ipc hit millions before anyone noticed.
+
+THE PRODUCT
+- Specter gives every npm package version a verdict (allow / warn / block) BEFORE install.
+- Same engine, three places: an API, a CLI in front of `npm install`, and a check on GitHub pull requests.
+- Also: scan any GitHub repo (5 scanners, 0-100 threat score, 3D scene, AI brief, PDF).
+
+HOW IT WORKS
+- Input: a package name@version, or a package-lock.json.
+- Signals from npm registry metadata: new publisher, new dependency, brand-new dependency, install script, lost provenance, typosquat, fresh release.
+- Signals from OSV.dev: known-malicious (MAL-) advisories force a block; CVEs add to the score.
+- Score = fixed weight per signal (critical 15, high 8, medium 4, low 1). 8+ = warn, 23+ = block.
+- Verdicts are cached in Supabase (6 h), so a package is analyzed once and shared by everyone.
+- If a source is down, the result is "warn", never "allow", and is not cached.
+
+DEMO (about 4 minutes)
+- 1. Landing page: open the event-stream sample report, show the 3D attack scene.
+- 2. API: curl POST /api/v1/check for event-stream@3.3.6 -> block, with the advisory id.
+- 3. CLI: run `specter-guard npm ci` on a lockfile containing event-stream@3.3.6 -> install stopped, project untouched.
+- 4. CLI: `specter-guard npm install lodash@4.17.21` -> warns, then installs.
+- 5. PR check: open a PR that adds a bad lockfile entry -> failing "specter/packages" status plus a comment.
+- 6. Show /docs (every example is runnable) and /pricing.
+
+TECH
+- Next.js 16 (App Router), React 19, TypeScript strict, Tailwind v4, Zustand.
+- Three.js via react-three-fiber for the 3D scene; framer-motion; jsPDF for reports.
+- Supabase (Postgres) for scans and the package_verdicts cache. Octokit for GitHub. Deployed on Vercel.
+- Check API: two POST routes, in-memory per-IP rate limit, 45 s time budget, unfinished work returns "pending" and finishes into the cache.
+- Lockfile checks: 12 parallel workers; 575 packages checked in about 32 s.
+- CLI: one Node file, no dependencies. Resolves the tree with `npm install --package-lock-only --ignore-scripts`, so no package code runs before the check. Fails closed if the API is unreachable.
+- PR check: signed GitHub webhook (HMAC, delivery dedupe), diffs base vs head lockfile, checks only new or changed packages, runs after the response.
+- Lockfiles from PRs are untrusted: names and versions are validated, and comments use titles only, never text written by a package author.
+
+MONEY
+- Free: check public packages (rate limited per IP), CLI, docs, repo scan.
+- Team, about $19 per developer per month: PR checks on private repos, block mode, wait-period rules, sandbox and AI review reports.
+- Enterprise, custom: registry proxy, private package analysis, SSO, SLA.
+- Threat feed, custom: live stream of malicious versions for security companies.
+- Costs stay low: each version is analyzed once and shared, and expensive checks only run on suspicious ones.
+
+HONEST LIMITS
+- A verdict is a risk signal, not a guarantee. Blocking is opt-in.
+- npm only. Needs lockfile v2 or v3.
+- Built today: verdict API, CLI, PR check, docs, repo scan. Not built yet: version diff, AI review of changes, sandbox, wait-period rules, release watcher.
+- The PR check has only been tested against a simulated GitHub, so run it once on a real repo before demoing.
+- Free tools exist (OpenSSF, GuardDog); we win on speed, fewer false alarms, and enforcement.
+
+BEFORE DEMO CHECKLIST
+- Merge the pricing-page and check-api branches; run the package_verdicts table from supabase/schema.sql.
+- Set GITHUB_TOKEN, GITHUB_WEBHOOK_SECRET and Supabase keys; point a repo webhook at /api/webhooks/github (Push and Pull requests).
+- Pre-run each demo command once so results are cached and fast.
