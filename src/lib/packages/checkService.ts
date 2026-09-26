@@ -1,4 +1,5 @@
 import { analyzePackage, type PackageVerdict, type Verdict, type CooldownOptions } from './analyze';
+import type { LlmReview } from './review';
 import type { LockfilePackage } from './lockfile';
 
 
@@ -34,6 +35,8 @@ export interface PackageCheck {
   verdict: CheckVerdict;
   score: number | null;
   signals: ApiSignal[];
+  /** The LLM's read of the diff, or its recorded failure. Absent when that step did not run. */
+  review?: LlmReview;
   analyzedAt: string | null;
   /**
    * When present, this version was on the caller's allowlist and the cooldown
@@ -93,6 +96,7 @@ function toCheck(v: PackageVerdict): Mapped {
     kind: 'ok',
     check: {
       name: v.name, version: v.version, verdict, score, signals, analyzedAt: v.analyzedAt,
+      ...(v.review ? { review: v.review } : {}),
       // Forward the allowlist override so API consumers can display it (#42)
       ...(v.allowlistedBy !== undefined ? { allowlisted: v.allowlistedBy } : {}),
     },

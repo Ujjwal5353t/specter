@@ -19,6 +19,16 @@ const CODE_FILE = /\.(?:[cm]?js|jsx|sh|bash|ps1|bat|cmd)$/i;
 const MAX_ADDED_CHARS = 300_000;
 const MAX_LINES = 50_000;
 const MAX_FILES_LISTED = 5;
+// What the LLM review (#43) is shown: the added code around each rule hit, size-capped
+export const HUNK_LIMITS = { hunks: 6, chars: 1500 } as const;
+
+/** The added code behind a diff signal: enough context for a reviewer, never a whole file. */
+export interface DiffHunk {
+  path: string;
+  /** Ids of the rules (or 'diff_install_script') that fired on this code. */
+  rules: string[];
+  added: string;
+}
 
 interface ChangedFile {
   path: string;
@@ -52,6 +62,15 @@ function readManifest(tarball: Tarball | null): { scripts?: Record<string, strin
   }
 }
 
+/** A window of `added` around the rule's evidence snippet, or its start when the snippet can't be located. */
+function excerptAround(added: string, evidence: string): string {
+  // The evidence is one printable line that begins 10 characters before the match
+  const at = added.indexOf(evidence.slice(10, 40));
+  if (at === -1 || added.length <= HUNK_LIMITS.chars) return added.slice(0, HUNK_LIMITS.chars);
+  const from = Math.max(0, at - 400);
+  return added.slice(from, from + HUNK_LIMITS.chars);
+}
+
 const listFiles = (paths: string[]) =>
   paths.slice(0, MAX_FILES_LISTED).join(', ') + (paths.length > MAX_FILES_LISTED ? `, +${paths.length - MAX_FILES_LISTED} more` : '');
 
@@ -60,7 +79,13 @@ const listFiles = (paths: string[]) =>
  * first release, which is scanned whole (there is nothing to diff against).
  */
 export function scanDiff(prev: Tarball | null, next: Tarball, label: string): VerdictSignal[] {
+  return analyzeDiff(prev, next, label).signals;
+}
+
+/** scanDiff plus the code behind its signals, for the LLM review. */
+export function analyzeDiff(prev: Tarball | null, next: Tarball, label: string): { signals: VerdictSignal[]; hunks: DiffHunk[] } {
   const signals: VerdictSignal[] = [];
+  const hunks: DiffHunk[] = [];
 
   // Files that are new or whose text changed, reduced to just the added lines
   const changed: ChangedFile[] = [];
@@ -86,6 +111,7 @@ export function scanDiff(prev: Tarball | null, next: Tarball, label: string): Ve
         title: `Install script "${hook}" was rewritten`,
         detail: `${label}: "${hook}" changed from \`${before[hook].slice(0, 60)}\` to \`${after[hook].slice(0, 60)}\`.`,
       });
+      hunks.push({ path: 'package.json', rules: ['diff_install_script'], added: `"${hook}": ${JSON.stringify(after[hook].slice(0, 400))}` });
     }
   }
 
@@ -111,11 +137,16 @@ export function scanDiff(prev: Tarball | null, next: Tarball, label: string): Ve
   const prevHosts = new Set<string>();
   for (const file of prev?.files.values() ?? []) if (file.text) for (const h of hostsIn(file.text)) prevHosts.add(h);
   const ctx: RuleContext = { prevHosts };
+  const fired = new Map<string, { file: ChangedFile; rules: string[]; evidence: string }>();
   for (const rule of RULES) {
     const hits: { path: string; evidence: string }[] = [];
     for (const file of changed) {
       const evidence = rule.detect(file.added, ctx);
-      if (evidence) hits.push({ path: file.path, evidence });
+      if (!evidence) continue;
+      hits.push({ path: file.path, evidence });
+      const seen = fired.get(file.path);
+      if (seen) seen.rules.push(rule.id);
+      else fired.set(file.path, { file, rules: [rule.id], evidence });
     }
     if (hits.length === 0) continue;
     signals.push({
@@ -126,11 +157,19 @@ export function scanDiff(prev: Tarball | null, next: Tarball, label: string): Ve
       detail: `${label} — in ${listFiles(hits.map((h) => h.path))}: "${hits[0].evidence}"`,
     });
   }
-  return signals;
+
+  // Files hit by the most rules first; the reviewer only ever sees these
+  const room = HUNK_LIMITS.hunks - hunks.length;
+  for (const { file, rules, evidence } of [...fired.values()].sort((a, b) => b.rules.length - a.rules.length).slice(0, Math.max(0, room))) {
+    hunks.push({ path: file.path, rules, added: excerptAround(file.added, evidence) });
+  }
+  return { signals, hunks };
 }
 
 export interface DiffTierResult {
   signals: VerdictSignal[];
+  /** The added code behind the signals, size-capped; input for the LLM review. */
+  hunks: DiffHunk[];
   /** Set when a download failed for a transient reason; the verdict must not be cached. */
   failure?: string;
   /** True when the tier ran (or was deterministically skipped), so tierReached can move to 'diff'. */
@@ -152,7 +191,7 @@ export async function runDiffTier(pk: Packument, version: string): Promise<DiffT
   const label = `${pk.name}@${version}`;
   try {
     const dist = pk.versions?.[version]?.dist;
-    if (!dist?.tarball) return { signals: [skippedSignal(label, 'the registry lists no tarball for this version')], reached: true };
+    if (!dist?.tarball) return { signals: [skippedSignal(label, 'the registry lists no tarball for this version')], hunks: [], reached: true };
 
     const prevVersion = semver.valid(version) ? previousVersion(pk, version) : null;
     const prevDist = prevVersion ? pk.versions?.[prevVersion]?.dist : undefined;
@@ -164,16 +203,16 @@ export async function runDiffTier(pk: Packument, version: string): Promise<DiffT
 
     if (!next.ok) {
       return next.kind === 'failed'
-        ? { signals: [], failure: 'tarball', reached: false }
-        : { signals: [skippedSignal(label, next.reason)], reached: true };
+        ? { signals: [], hunks: [], failure: 'tarball', reached: false }
+        : { signals: [skippedSignal(label, next.reason)], hunks: [], reached: true };
     }
     if (prev && !prev.ok) {
       return prev.kind === 'failed'
-        ? { signals: [], failure: 'tarball:previous', reached: false }
-        : { signals: [skippedSignal(label, `previous version ${prevVersion}: ${prev.reason}`)], reached: true };
+        ? { signals: [], hunks: [], failure: 'tarball:previous', reached: false }
+        : { signals: [skippedSignal(label, `previous version ${prevVersion}: ${prev.reason}`)], hunks: [], reached: true };
     }
-    return { signals: scanDiff(prev?.ok ? prev.tarball : null, next.tarball, label), reached: true };
+    return { ...analyzeDiff(prev?.ok ? prev.tarball : null, next.tarball, label), reached: true };
   } catch (err) {
-    return { signals: [], failure: `tarball: ${err instanceof Error ? err.message : String(err)}`, reached: false };
+    return { signals: [], hunks: [], failure: `tarball: ${err instanceof Error ? err.message : String(err)}`, reached: false };
   }
 }

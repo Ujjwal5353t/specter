@@ -9,7 +9,8 @@
     "lint": "eslint",
     "benchmark": "tsx scripts/benchmark/run.mts",
     "eval-verdicts": "tsx scripts/eval-verdicts.mjs",
-    "verify-diff": "tsx scripts/verify-diff.mts"
+    "verify-diff": "tsx scripts/verify-diff.mts",
+    "verify-review": "tsx scripts/verify-review.mts"
   },
   "dependencies": {
     "@fontsource-variable/archivo": "^5.3.0",
