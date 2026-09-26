@@ -13,7 +13,7 @@ function sweep(now: number) {
   }
 }
 
-export function rateLimit(ip: string, max = 5, windowMs = 60 * 60 * 1000): boolean {
+export function rateLimit(ip: string, max = 15, windowMs = 60 * 60 * 1000): boolean {
   const now = Date.now();
   sweep(now);
   const entry = map.get(ip);

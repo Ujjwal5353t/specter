@@ -32,7 +32,7 @@ PDF      : jsPDF + jspdf-autotable, generated in the browser
   -> POST /api/scan/start
 
 [/api/scan/start]
-  1. per-IP rate limit (5 scans/hour, in-memory)
+  1. per-IP rate limit (15 scans/hour, in-memory)
   2. parseRepoUrl -> owner/repo, normalise to lowercase URL
   3. check scan_cache for a row < 6 hours old
        HIT  -> insert a 'completed' scans row, return scanId immediately

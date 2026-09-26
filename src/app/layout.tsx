@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import GlobalScene from "@/components/Scene/GlobalScene";
+import ConsoleFrame from "@/components/console/ConsoleFrame";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -29,18 +30,11 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="h-screen w-screen overflow-hidden bg-void text-white">
-        
-        {/* GLOBAL CANVAS - Persistent 3D Background */}
-        <div className="absolute inset-0 z-0 pointer-events-auto">
-          <GlobalScene />
-        </div>
-
-        {/* UI LAYER - pointer-events-none allows clicks to pass through to the Canvas behind */}
-        {/* We use a wrapper div that is pointer-events-none, and the children (pages) will be pointer-events-auto */}
-        <div className="relative z-10 h-full w-full pointer-events-none">
-          {children}
-        </div>
-        
+        {/* GLOBAL CANVAS - Persistent 3D Background, plus the UI layer above it.
+            ConsoleFrame keeps the original full-screen layering on the landing
+            page and adds the SPECTER HUD + intelligence rail on console routes,
+            fitting the same persistent scene into the content area. */}
+        <ConsoleFrame scene={<GlobalScene />}>{children}</ConsoleFrame>
       </body>
     </html>
   );

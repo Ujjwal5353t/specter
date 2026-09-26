@@ -83,6 +83,7 @@ const UNLIKELY = JSON.stringify({ malicious: 'unlikely', reasons: ['ordinary cod
   check('a block is never lowered', !shouldLower('block', sig, [], ok('unlikely')));
   check('an allow is left alone', !shouldLower('allow', sig, [], ok('unlikely')));
   check('a MAL advisory forbids lowering', !shouldLower('warn', [...sig, { type: 'osv_malicious' }], [], ok('unlikely')));
+  check('a cooldown hold (too_new) forbids lowering', !shouldLower('warn', [...sig, { type: 'too_new' }], [], ok('unlikely')));
   check('a failed source forbids lowering', !shouldLower('warn', sig, ['osv'], ok('unlikely')));
   check('suspected injection forbids lowering', !shouldLower('warn', sig, [], ok('unlikely', true)));
   check('a failed review never lowers', !shouldLower('warn', sig, [], { status: 'failed', error: 'x', injectionSuspected: false }));
@@ -232,6 +233,10 @@ const UNLIKELY = JSON.stringify({ malicious: 'unlikely', reasons: ['ordinary cod
     const plain1 = await analyzePackage('zz-plain', '1.0.1');
     check('e2e: control: same model answer on unremarkable code lowers warn to allow', plain1.verdict === 'allow' && plain1.review?.status === 'ok' && plain1.review.loweredVerdict, JSON.stringify({ v: plain1.verdict, r: plain1.review, s: plain1.signals.map((x) => x.type) }));
     check('e2e: lowering keeps the score and signals visible', plain1.score >= 8 && plain1.signals.length > 0);
+
+    // Same package and same model answer, but held by the cooldown (#42): a policy hold is not the model's to lift
+    const held = await analyzePackage('zz-plain', '1.0.1', { cooldown: { minReleaseAgeHours: 24 * 365 * 20 } });
+    check('e2e: a cooldown hold is not lowered by an unlikely review', held.verdict === 'warn' && held.signals.some((x) => x.type === 'too_new') && held.review?.status === 'ok' && held.review.malicious === 'unlikely' && !held.review.loweredVerdict, JSON.stringify({ v: held.verdict, s: held.signals.map((x) => x.type), r: held.review }));
 
     mode = 'outage';
     const out = await analyzePackage('zz-outage', '1.0.1');

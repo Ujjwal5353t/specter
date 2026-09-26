@@ -84,6 +84,16 @@ create table if not exists public.package_verdicts (
 -- LLM review of the diff (#43): { status, malicious, reasons, model, ... } or a recorded failure.
 alter table public.package_verdicts add column if not exists review jsonb;
 
+-- Triage state for exposed secrets (console Secrets view → MARK RESOLVED).
+-- Keyed per repo + finding fingerprint so a resolution survives rescans.
+create table if not exists public.finding_triage (
+  repo_url      text not null,
+  fingerprint   text not null,
+  status        text not null check (status in ('open', 'resolved')),
+  updated_at    timestamptz not null default now(),
+  primary key (repo_url, fingerprint)
+);
+
 -- The app only talks to Supabase from the server with the secret key, which bypasses RLS.
 -- Enabling RLS with no policies blocks anyone using the publishable key from reading these tables.
 alter table public.scans      enable row level security;
@@ -91,6 +101,7 @@ alter table public.findings   enable row level security;
 alter table public.scan_cache enable row level security;
 alter table public.scan_progress enable row level security;
 alter table public.package_verdicts enable row level security;
+alter table public.finding_triage enable row level security;
 
 -- Make PostgREST pick up the new tables immediately.
 notify pgrst, 'reload schema';

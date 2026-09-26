@@ -97,7 +97,7 @@ A6. Test 4 - Edge cases
   Nonexistent / private repo       GitHub calls fail; most scanners return empty and the scan usually finishes
                                    with score 0 rather than "failed" (known behavior; avoid on stage)
   Huge monorepo                    slower, capped (APIBleed 35 files, EnvTrace 25 sources, GhostCommit 30 commits)
-  Rate limit                       6th scan from the same IP within an hour -> "Rate limit: 5 scans per hour"
+  Rate limit                       16th scan from the same IP within an hour -> "Rate limit: 15 scans per hour"
 
 
 A7. Test 5 - Resilience (the "independent scanners" claim)
@@ -141,7 +141,7 @@ B1. Before you go on stage (checklist)
   [ ] NEXT_PUBLIC_APP_URL matches where you're running (localhost or the Vercel URL)
   [ ] PRE-WARM THE CACHE: scan your live-demo repo within the 6 hours before you present. A repeat scan is
       served from scan_cache instantly, so the live path is fast and can't hit rate limits.
-  [ ] Rate limit is 5 scans/hour PER IP, and venue wifi often shares one IP. Restart the server before the
+  [ ] Rate limit is 15 scans/hour PER IP, and venue wifi often shares one IP. Restart the server before the
       demo (limiter is in memory) and tell judges not to all scan at once, or raise the default in
       src/lib/rateLimit.ts for the event.
   [ ] Browser full screen, zoom 100%, extensions off, tabs closed, do a warm-up demo load so shaders compile
