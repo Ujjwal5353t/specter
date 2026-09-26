@@ -1,5 +1,6 @@
-import { analyzePackage, type PackageVerdict, type Verdict } from './analyze';
+import { analyzePackage, type PackageVerdict, type Verdict, type CooldownOptions } from './analyze';
 import type { LockfilePackage } from './lockfile';
+
 
 /**
  * What the public check API returns, built on analyzePackage(). Shared by
@@ -34,7 +35,17 @@ export interface PackageCheck {
   score: number | null;
   signals: ApiSignal[];
   analyzedAt: string | null;
+  /**
+   * When present, this version was on the caller's allowlist and the cooldown
+   * was skipped. The value is the exact allow-entry string ("name@version")
+   * that matched, for display in CLI output and API responses (#42).
+   */
+  allowlisted?: string;
 }
+
+// Re-export so route handlers only need one import
+export type { CooldownOptions };
+
 
 export interface LockfileCheck {
   verdict: Verdict;
@@ -80,17 +91,22 @@ function toCheck(v: PackageVerdict): Mapped {
   }
   return {
     kind: 'ok',
-    check: { name: v.name, version: v.version, verdict, score, signals, analyzedAt: v.analyzedAt },
+    check: {
+      name: v.name, version: v.version, verdict, score, signals, analyzedAt: v.analyzedAt,
+      // Forward the allowlist override so API consumers can display it (#42)
+      ...(v.allowlistedBy !== undefined ? { allowlisted: v.allowlistedBy } : {}),
+    },
   };
 }
+
 
 function pendingCheck(name: string, version: string): PackageCheck {
   return { name, version, verdict: 'pending', score: null, signals: [], analyzedAt: null };
 }
 
 /** analyzePackage never throws, but a bug in it must not take the whole request down. */
-function safeAnalyze(name: string, version: string, integrity?: string): Promise<Mapped> {
-  return analyzePackage(name, version, { integrity })
+function safeAnalyze(name: string, version: string, integrity?: string, cooldown?: CooldownOptions): Promise<Mapped> {
+  return analyzePackage(name, version, { integrity, cooldown })
     .then(toCheck)
     .catch((): Mapped => ({
       kind: 'ok',
@@ -117,8 +133,13 @@ export type SingleResult =
   /** `background` is the still-running analysis; hand it to after() so it can finish into the cache. */
   | { kind: 'pending'; check: PackageCheck; background: Promise<unknown> };
 
-export async function checkPackage(name: string, version: string, budgetMs = SINGLE_BUDGET_MS): Promise<SingleResult> {
-  const work = safeAnalyze(name, version);
+export async function checkPackage(
+  name: string,
+  version: string,
+  budgetMs = SINGLE_BUDGET_MS,
+  cooldown?: CooldownOptions,
+): Promise<SingleResult> {
+  const work = safeAnalyze(name, version, undefined, cooldown);
   const out = await raceDeadline(work, budgetMs);
   if (out === TIMED_OUT) return { kind: 'pending', check: pendingCheck(name, version), background: work };
   return out.kind === 'ok' ? { kind: 'done', check: out.check } : { kind: 'not_found' };
@@ -131,6 +152,7 @@ const ORDER: Record<CheckVerdict, number> = { block: 0, warn: 1, pending: 2, all
 export async function checkLockfile(
   packages: LockfilePackage[],
   budgetMs = LOCKFILE_BUDGET_MS,
+  cooldown?: CooldownOptions,
 ): Promise<{ result: LockfileCheck; background: Promise<unknown> }> {
   const deadline = Date.now() + budgetMs;
   const checks: PackageCheck[] = packages.map((p) => pendingCheck(p.name, p.version));
@@ -144,7 +166,7 @@ export async function checkLockfile(
     while (next < packages.length && Date.now() < deadline) {
       const i = next++;
       const p = packages[i];
-      const work = safeAnalyze(p.name, p.version, p.integrity);
+      const work = safeAnalyze(p.name, p.version, p.integrity, cooldown);
       const out = await raceDeadline(work, deadline - Date.now());
       if (out === TIMED_OUT) {
         inflight.push(work);
@@ -171,3 +193,4 @@ export async function checkLockfile(
     background: Promise.allSettled(inflight),
   };
 }
+
