@@ -86,6 +86,7 @@ Known weak spots: human-chosen passwords and pure-hex secrets (hex never exceeds
 - **Immersive 3D HUD:** Powered by `react-three-fiber`. Dependency graphs, attack paths, and secret timelines are rendered in a 3D tactical space, allowing you to spatially understand how an attacker moves through your application.
 - **AI-Native Analysis:** Powered by Gemini/OpenRouter, Specter doesn't just list CVEs. It provides an "Intelligence Brief" that translates complex vulnerability data into actionable remediation steps and real-world impact scenarios.
 - **Continuous Monitoring:** Point a GitHub push webhook at Specter and every push to the default branch triggers a fresh scan (bypassing the 6h cache). If the new threat score is higher than the last one, a Telegram alert lands with the score delta, the commit that caused it, and the top critical/high findings. Repos you don't own can be watched on a schedule via a cron endpoint instead.
+- **Pre-install package check:** `POST /api/v1/check` and `POST /api/v1/check/lockfile` return an allow / warn / block verdict for any npm package version or `package-lock.json`, from registry metadata and OSV, before anything is installed. The `specter-guard` CLI (`cli/`) wraps `npm install` with it, and a pull request that changes `package-lock.json` gets a `specter/packages` commit status plus a comment through the same webhook. See `/docs` in the app.
 - **Exportable Intel:** Generates high-fidelity PDF intelligence reports containing your vulnerability surface area and top remediation priorities, ready for audit or team review.
 
 ---
@@ -139,7 +140,7 @@ MONITORED_REPOS=owner/repo,owner/other-repo
 
 1. **(Optional) Set up monitoring:**
    - **Telegram:** create a bot with [@BotFather](https://t.me/BotFather), message it once, then read your chat id from `https://api.telegram.org/bot<token>/getUpdates`.
-   - **Push webhook (repos you own):** Repo → Settings → Webhooks → Add webhook. Payload URL `https://<your-app>/api/webhooks/github`, content type `application/json`, secret = `GITHUB_WEBHOOK_SECRET`, "Just the push event".
+   - **Push webhook (repos you own):** Repo → Settings → Webhooks → Add webhook. Payload URL `https://<your-app>/api/webhooks/github`, content type `application/json`, secret = `GITHUB_WEBHOOK_SECRET`, "Push" and "Pull requests" events. Pull requests that touch `package-lock.json` get a `specter/packages` commit status (failing on a blocked package) and one comment that is updated on each push; `GITHUB_TOKEN` needs commit-status and pull-request/issue write access.
    - **Scheduled rescans (any public repo):** hit `GET /api/monitor/cron` with `Authorization: Bearer $CRON_SECRET` from Vercel Cron or any external scheduler; it rescans every repo in `MONITORED_REPOS`.
 
    The first monitored scan of a repo sends a "now monitoring" baseline message; after that you only get alerted when the score goes up.

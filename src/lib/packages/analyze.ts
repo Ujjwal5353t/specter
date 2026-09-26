@@ -29,6 +29,10 @@ import {
 
 const OSV_QUERY_API = 'https://api.osv.dev/v1/query';
 const FETCH_TIMEOUT_MS = 8000;
+// A cached verdict is re-derived after this long: OSV `MAL-` advisories are
+// usually published after a malicious version is already live, so an old
+// `allow` must not be trusted forever.
+const VERDICT_TTL_MS = 6 * 60 * 60 * 1000;
 // A release adding more dependencies than this is off the normal path; the rest go unchecked
 const MAX_NEW_DEPS_CHECKED = 10;
 const REGISTRY_CONCURRENCY = 6;
@@ -225,6 +229,7 @@ async function readCache(name: string, version: string, integrity?: string): Pro
     if (integrity) query = query.eq('integrity', integrity);
     const { data, error } = await query.order('analyzed_at', { ascending: false }).limit(1);
     if (error || !data || data.length === 0) return null;
+    if (Date.now() - Date.parse(data[0].analyzed_at) > VERDICT_TTL_MS) return null;
     return rowToVerdict(data[0]);
   } catch {
     return null;
