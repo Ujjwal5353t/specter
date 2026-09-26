@@ -7,6 +7,8 @@ import {
   analyzeVersion, youngDependencySignal,
   type NpmVersionDoc,
 } from '@/lib/scanners/deprisk';
+import { resolveCooldown, formatAge, type CooldownOptions } from './cooldown';
+
 
 /**
  * Package-level pre-install verdict engine (issue #27/#28): given one npm
@@ -44,7 +46,9 @@ export type VerdictSignalType =
   | 'fresh_release' | 'install_script' | 'provenance_dropped' | 'typosquat'
   | 'osv_malicious' | 'osv_advisory'
   // Tarball-diff tier (#39)
-  | 'diff_rule' | 'diff_install_script' | 'diff_new_files' | 'diff_skipped' | 'archive_anomaly';
+  | 'diff_rule' | 'diff_install_script' | 'diff_new_files' | 'diff_skipped' | 'archive_anomaly'
+  // Cooldown / allowlist tier (#42)
+  | 'too_new';
 
 export interface VerdictSignal {
   type: VerdictSignalType;
@@ -76,7 +80,18 @@ export interface PackageVerdict {
    * "clean", so a verdict with failures is never `allow` (see analyzePackage).
    */
   sourceFailures: string[];
+  /**
+   * The allowlist entry that matched this package, if any (#42).
+   * Present only when the caller passed a `CooldownOptions.allow` list and this
+   * version was on it. The cooldown check is skipped and this field lets the
+   * caller print the override to the user.
+   */
+  allowlistedBy?: string;
 }
+
+// Re-export so callers only need to import from this file
+export type { CooldownOptions } from './cooldown';
+
 
 // ── Scoring ──────────────────────────────────────────────────────────────
 //
@@ -282,22 +297,29 @@ function unchecked(name: string, version: string, failure: string): PackageVerdi
  * `sourceFailures` and simply contributes no signals, rather than failing
  * the whole check or being counted as "clean". `integrity` is the lockfile's
  * hash for this version, when the caller has one.
+ *
+ * Pass `cooldown` to enable the minimum-release-age hold (#42). When omitted
+ * the behaviour is identical to the pre-#42 code path.
  */
 export async function analyzePackage(
   name: string,
   version: string,
-  options: { integrity?: string } = {},
+  options: { integrity?: string; cooldown?: CooldownOptions } = {},
 ): Promise<PackageVerdict> {
   if (!PACKAGE_NAME.test(name) || semver.valid(version) !== version) {
     return unchecked(name, version, 'invalid-input');
   }
 
   try {
+    // Cache lookup runs before cooldown: a cached verdict already went through
+    // the full analysis pipeline and its age is encoded in its signals, so we
+    // don't re-apply the hold on top of it. The cooldown is a pre-publish gate,
+    // not a long-term label.
     const cached = await readCache(name, version, options.integrity);
     if (cached) return cached;
 
     const label = `${name}@${version}`;
-    const sourceFailures: string[] = [];
+    const sourceFailures: string[] = []
     const signals: VerdictSignal[] = [];
     const now = Date.now();
     const limit = createLimiter(REGISTRY_CONCURRENCY);
@@ -310,6 +332,56 @@ export async function analyzePackage(
     const doc = pk?.versions?.[version];
     if (!pk) sourceFailures.push('registry');
     else if (!doc) sourceFailures.push('version-not-found');
+
+    // ── Cooldown / allowlist check (#42) ────────────────────────────────────
+    // Runs right after the packument is fetched (so we have the publish time)
+    // and before the rest of the analysis: an allowlisted package skips all
+    // other checks and returns immediately; a held one gets a too_new signal
+    // injected but still completes the full analysis so all other signals are
+    // visible too.
+    let allowlistedBy: string | undefined;
+    if (options.cooldown && pk && doc) {
+      // pk.time[version] is the publish timestamp in ISO format
+      const publishedAt: number | null = (() => {
+        const t = pk.time?.[version];
+        if (!t) return null;
+        const ms = Date.parse(t);
+        return Number.isNaN(ms) ? null : ms;
+      })();
+
+      const cooldownResult = resolveCooldown(name, version, publishedAt, now, options.cooldown);
+
+      if (cooldownResult.kind === 'allowed') {
+        // Allowlisted: skip cooldown, mark the override, continue normal analysis.
+        allowlistedBy = cooldownResult.entry;
+      } else if (cooldownResult.kind === 'held') {
+        // Version is too new. Add a signal describing the hold.
+        const ageText   = formatAge(cooldownResult.ageMs);
+        const needText  = formatAge(cooldownResult.minAgeMs);
+        const isStrict  = options.cooldown.strict === true;
+        signals.push({
+          type: 'too_new',
+          severity: isStrict ? 'high' : 'medium',
+          title: 'Version is too new (cooldown hold)',
+          detail:
+            `Published ${ageText} ago — minimum required age is ${needText}. ` +
+            `Install once the version is older, or add it to the allow list to override.`,
+        });
+        // In strict mode we don't bother with the rest of the analysis —
+        // a block verdict is already guaranteed by the score.
+        if (isStrict) {
+          const score = scoreOf(signals);
+          return {
+            name, version, integrity: integrityOf(doc),
+            verdict: 'block', score, signals, tierReached: 'metadata',
+            analyzedAt: new Date(now).toISOString(),
+            fromCache: false, sourceFailures,
+          };
+        }
+        // Non-strict: continue the full pipeline so all other signals are visible.
+      }
+      // kind === 'pass': feature off or version is old enough — fall through normally.
+    }
 
     if (pk && doc) {
       const analysis = analyzeVersion(pk, version, now);
@@ -362,15 +434,19 @@ export async function analyzePackage(
       score, signals, tierReached,
       analyzedAt: new Date(now).toISOString(),
       fromCache: false, sourceFailures,
+      ...(allowlistedBy !== undefined ? { allowlistedBy } : {}),
     };
 
-    // Only a complete verdict is cached: one built without a source could
-    // under-report, and a cache hit would hide that. A removed version is left
-    // uncached too, in case it is (re)published later.
-    if (sourceFailures.length === 0) await writeCache(verdict);
+    // Cooldown-held verdicts are NOT cached: the hold exists precisely because
+    // the version is brand-new, and the cached verdict must not outlive the
+    // cooldown window. Once the version is old enough, the next call will re-run
+    // the full analysis (without a too_new signal) and cache that clean result.
+    const hasCooldownSignal = signals.some((s) => s.type === 'too_new');
+    if (sourceFailures.length === 0 && !hasCooldownSignal) await writeCache(verdict);
 
     return verdict;
   } catch (err) {
     return unchecked(name, version, `analysis-error: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
+
