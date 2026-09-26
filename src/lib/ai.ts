@@ -80,13 +80,52 @@ Respond ONLY with valid JSON (no markdown fences, no preamble):
 
 For "attack_pattern": describe the general technique attackers use against this class of issue. Do NOT name specific companies, breaches, incidents, or CVE IDs, and never invent events.`;
 
-  // Try each configured provider in turn; a failing one (bad key, retired
-  // model, rate limit) falls through to the next instead of yielding an
-  // empty brief.
+  const { text } = await generateText(prompt);
+  return parseAIResponse(text);
+}
+
+export interface GenerateOptions {
+  /** Instructions kept apart from the user prompt, for callers that put untrusted text in the prompt. */
+  system?: string;
+  temperature?: number;
+  /** Total time across every provider attempt. Unset means no limit. */
+  budgetMs?: number;
+  /** Cap on a single provider attempt, so one slow provider cannot use up the whole budget. */
+  attemptMs?: number;
+  /** Throws to reject an answer; the next provider is then tried, as if the call had failed. */
+  validate?: (text: string) => void;
+}
+
+export interface GenerateResult {
+  text: string;
+  /** The model that actually answered (OpenRouter's `openrouter/free` reports the model it picked). */
+  model: string;
+}
+
+export function isAIConfigured(): boolean {
+  return Boolean(process.env.OPENROUTER_API_KEY || process.env.GEMINI_API_KEY);
+}
+
+/**
+ * Runs `prompt` through the first provider that answers. A failing one (bad
+ * key, retired model, rate limit) falls through to the next instead of
+ * yielding nothing. Throws AINotConfiguredError when no key is set.
+ */
+export async function generateText(prompt: string, opts: GenerateOptions = {}): Promise<GenerateResult> {
+  const temperature = opts.temperature ?? 0.2;
+  const deadline = opts.budgetMs === undefined ? null : Date.now() + opts.budgetMs;
+  // Each attempt gets what is left of the budget, capped by attemptMs; undefined means unlimited
+  const signal = () => {
+    const ms = Math.min(deadline === null ? Infinity : deadline - Date.now(), opts.attemptMs ?? Infinity);
+    return Number.isFinite(ms) ? AbortSignal.timeout(Math.max(1, ms)) : undefined;
+  };
+  const outOfTime = () => deadline !== null && Date.now() >= deadline;
+
   const errors: string[] = [];
 
   // OpenRouter path
-  if (process.env.OPENROUTER_API_KEY) {
+  if (process.env.OPENROUTER_API_KEY && !outOfTime()) {
+    const requested = process.env.OPENROUTER_MODEL ?? 'openrouter/free';
     try {
       const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
@@ -98,17 +137,22 @@ For "attack_pattern": describe the general technique attackers use against this 
         },
         body: JSON.stringify({
           // 'openrouter/free' automatically selects from available free models at zero cost.
-          model: process.env.OPENROUTER_MODEL ?? 'openrouter/free',
-          messages: [{ role: 'user', content: prompt }],
+          model: requested,
+          messages: [
+            ...(opts.system ? [{ role: 'system', content: opts.system }] : []),
+            { role: 'user', content: prompt },
+          ],
           max_tokens: 2000,
-          temperature: 0.2,
+          temperature,
         }),
+        signal: signal(),
       });
       if (!res.ok) throw new Error(await failure('OpenRouter', res));
       const data = await res.json().catch(() => ({}));
       const text: string = data.choices?.[0]?.message?.content ?? '';
       if (!text) throw new Error(`OpenRouter ${res.status}: empty response`);
-      return parseAIResponse(text);
+      opts.validate?.(text);
+      return { text, model: typeof data.model === 'string' && data.model ? data.model : requested };
     } catch (e) {
       errors.push(errorText('OpenRouter', e));
     }
@@ -120,6 +164,7 @@ For "attack_pattern": describe the general technique attackers use against this 
   if (process.env.GEMINI_API_KEY) {
     const models = [process.env.GEMINI_MODEL ?? 'gemini-flash-latest', 'gemini-flash-lite-latest'];
     for (const model of models) {
+      if (outOfTime()) break;
       try {
         const res = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
@@ -127,17 +172,20 @@ For "attack_pattern": describe the general technique attackers use against this 
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
+              ...(opts.system ? { systemInstruction: { parts: [{ text: opts.system }] } } : {}),
               contents: [{ parts: [{ text: prompt }] }],
               // Newer models spend part of this budget on thinking, so leave room for the JSON.
-              generationConfig: { temperature: 0.2, maxOutputTokens: 8192 },
+              generationConfig: { temperature, maxOutputTokens: 8192 },
             }),
+            signal: signal(),
           }
         );
         if (!res.ok) throw new Error(await failure(`Gemini (${model})`, res));
         const data = await res.json().catch(() => ({}));
         const text: string = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
         if (!text) throw new Error(`Gemini (${model}) ${res.status}: empty response`);
-        return parseAIResponse(text);
+        opts.validate?.(text);
+        return { text, model: typeof data.modelVersion === 'string' && data.modelVersion ? data.modelVersion : model };
       } catch (e) {
         errors.push(errorText(`Gemini (${model})`, e));
       }
@@ -145,6 +193,7 @@ For "attack_pattern": describe the general technique attackers use against this 
   }
 
   if (errors.length > 0) throw new Error(`AI providers failed: ${errors.join('; ')}`);
+  if (isAIConfigured()) throw new Error('AI providers failed: time budget exhausted');
   throw new AINotConfiguredError();
 }
 

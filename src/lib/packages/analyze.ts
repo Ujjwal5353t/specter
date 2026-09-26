@@ -3,10 +3,13 @@ import type { Severity } from '@/types';
 import { supabaseAdmin } from '@/lib/supabase';
 import { PACKAGE_NAME, createLimiter, fetchPackument, checkTyposquat } from '@/lib/npm/registry';
 import { runDiffTier } from './diff';
+import { reviewDiff, shouldLower, type LlmReview } from './review';
 import {
   analyzeVersion, youngDependencySignal,
   type NpmVersionDoc,
 } from '@/lib/scanners/deprisk';
+import { resolveCooldown, formatAge, type CooldownOptions } from './cooldown';
+
 
 /**
  * Package-level pre-install verdict engine (issue #27/#28): given one npm
@@ -17,8 +20,10 @@ import {
  * Tier 1 is registry metadata + OSV. A version that scores at or above the warn
  * threshold is escalated to tier 2, the tarball diff (diff.ts): its files are
  * compared with the previous version's and scanned as text, never executed.
- * The LLM review and sandbox tiers (#43/#45) will hang off the same rule, see
- * needsEscalation() below.
+ * Tier 3, the LLM review (review.ts, #43), reads the code behind the diff signals as
+ * a tiebreaker: it is recorded on the verdict, can never raise it, and can lower
+ * `warn` to `allow` only in the narrow case shouldLower() allows. The sandbox tier
+ * (#45) will hang off the same rule, see needsEscalation() below.
  *
  * CACHING. Published npm versions are immutable, so a verdict is looked up by
  * (name, version) *before* any network call: a repeat call is one DB read. A
@@ -44,7 +49,9 @@ export type VerdictSignalType =
   | 'fresh_release' | 'install_script' | 'provenance_dropped' | 'typosquat'
   | 'osv_malicious' | 'osv_advisory'
   // Tarball-diff tier (#39)
-  | 'diff_rule' | 'diff_install_script' | 'diff_new_files' | 'diff_skipped' | 'archive_anomaly';
+  | 'diff_rule' | 'diff_install_script' | 'diff_new_files' | 'diff_skipped' | 'archive_anomaly'
+  // Cooldown / allowlist tier (#42)
+  | 'too_new';
 
 export interface VerdictSignal {
   type: VerdictSignalType;
@@ -76,7 +83,24 @@ export interface PackageVerdict {
    * "clean", so a verdict with failures is never `allow` (see analyzePackage).
    */
   sourceFailures: string[];
+  /**
+   * The LLM's read of the diff (#43). Absent when the step did not run: nothing
+   * to review, or no AI key configured. A failed review is recorded here as
+   * `status: 'failed'` rather than hidden.
+   */
+  review?: LlmReview;
+  /**
+   * The allowlist entry that matched this package, if any (#42).
+   * Present only when the caller passed a `CooldownOptions.allow` list and this
+   * version was on it. The cooldown check is skipped and this field lets the
+   * caller print the override to the user.
+   */
+  allowlistedBy?: string;
 }
+
+// Re-export so callers only need to import from this file
+export type { CooldownOptions } from './cooldown';
+
 
 // ── Scoring ──────────────────────────────────────────────────────────────
 //
@@ -207,7 +231,7 @@ function osvSignals(vulns: OSVVuln[]): VerdictSignal[] {
 
 function rowToVerdict(row: {
   name: string; version: string; integrity: string; verdict: Verdict; score: number;
-  signals: VerdictSignal[]; tier_reached: string; analyzed_at: string;
+  signals: VerdictSignal[]; tier_reached: string; analyzed_at: string; review?: LlmReview | null;
 }): PackageVerdict {
   return {
     name: row.name, version: row.version, integrity: row.integrity,
@@ -215,6 +239,7 @@ function rowToVerdict(row: {
     tierReached: row.tier_reached === 'diff' ? 'diff' : 'metadata', analyzedAt: row.analyzed_at,
     // Only complete verdicts are ever written, so a cached one had no failed source
     fromCache: true, sourceFailures: [],
+    ...(row.review ? { review: row.review } : {}),
   };
 }
 
@@ -246,6 +271,8 @@ async function writeCache(v: PackageVerdict): Promise<void> {
       name: v.name, version: v.version, integrity: v.integrity,
       verdict: v.verdict, score: v.score, signals: v.signals,
       tier_reached: v.tierReached, analyzed_at: v.analyzedAt,
+      // Only sent when there is one, so caching still works before the `review` column is migrated
+      ...(v.review ? { review: v.review } : {}),
     }, { onConflict: 'name,version,integrity' });
     if (error) console.warn(`package_verdicts write failed (${v.name}@${v.version}):`, error.message);
   } catch (err) {
@@ -282,22 +309,29 @@ function unchecked(name: string, version: string, failure: string): PackageVerdi
  * `sourceFailures` and simply contributes no signals, rather than failing
  * the whole check or being counted as "clean". `integrity` is the lockfile's
  * hash for this version, when the caller has one.
+ *
+ * Pass `cooldown` to enable the minimum-release-age hold (#42). When omitted
+ * the behaviour is identical to the pre-#42 code path.
  */
 export async function analyzePackage(
   name: string,
   version: string,
-  options: { integrity?: string } = {},
+  options: { integrity?: string; cooldown?: CooldownOptions } = {},
 ): Promise<PackageVerdict> {
   if (!PACKAGE_NAME.test(name) || semver.valid(version) !== version) {
     return unchecked(name, version, 'invalid-input');
   }
 
   try {
+    // Cache lookup runs before cooldown: a cached verdict already went through
+    // the full analysis pipeline and its age is encoded in its signals, so we
+    // don't re-apply the hold on top of it. The cooldown is a pre-publish gate,
+    // not a long-term label.
     const cached = await readCache(name, version, options.integrity);
     if (cached) return cached;
 
     const label = `${name}@${version}`;
-    const sourceFailures: string[] = [];
+    const sourceFailures: string[] = []
     const signals: VerdictSignal[] = [];
     const now = Date.now();
     const limit = createLimiter(REGISTRY_CONCURRENCY);
@@ -310,6 +344,56 @@ export async function analyzePackage(
     const doc = pk?.versions?.[version];
     if (!pk) sourceFailures.push('registry');
     else if (!doc) sourceFailures.push('version-not-found');
+
+    // ── Cooldown / allowlist check (#42) ────────────────────────────────────
+    // Runs right after the packument is fetched (so we have the publish time)
+    // and before the rest of the analysis: an allowlisted package skips all
+    // other checks and returns immediately; a held one gets a too_new signal
+    // injected but still completes the full analysis so all other signals are
+    // visible too.
+    let allowlistedBy: string | undefined;
+    if (options.cooldown && pk && doc) {
+      // pk.time[version] is the publish timestamp in ISO format
+      const publishedAt: number | null = (() => {
+        const t = pk.time?.[version];
+        if (!t) return null;
+        const ms = Date.parse(t);
+        return Number.isNaN(ms) ? null : ms;
+      })();
+
+      const cooldownResult = resolveCooldown(name, version, publishedAt, now, options.cooldown);
+
+      if (cooldownResult.kind === 'allowed') {
+        // Allowlisted: skip cooldown, mark the override, continue normal analysis.
+        allowlistedBy = cooldownResult.entry;
+      } else if (cooldownResult.kind === 'held') {
+        // Version is too new. Add a signal describing the hold.
+        const ageText   = formatAge(cooldownResult.ageMs);
+        const needText  = formatAge(cooldownResult.minAgeMs);
+        const isStrict  = options.cooldown.strict === true;
+        signals.push({
+          type: 'too_new',
+          severity: isStrict ? 'high' : 'medium',
+          title: 'Version is too new (cooldown hold)',
+          detail:
+            `Published ${ageText} ago — minimum required age is ${needText}. ` +
+            `Install once the version is older, or add it to the allow list to override.`,
+        });
+        // In strict mode we don't bother with the rest of the analysis —
+        // a block verdict is already guaranteed by the score.
+        if (isStrict) {
+          const score = scoreOf(signals);
+          return {
+            name, version, integrity: integrityOf(doc),
+            verdict: 'block', score, signals, tierReached: 'metadata',
+            analyzedAt: new Date(now).toISOString(),
+            fromCache: false, sourceFailures,
+          };
+        }
+        // Non-strict: continue the full pipeline so all other signals are visible.
+      }
+      // kind === 'pass': feature off or version is old enough — fall through normally.
+    }
 
     if (pk && doc) {
       const analysis = analyzeVersion(pk, version, now);
@@ -346,31 +430,52 @@ export async function analyzePackage(
     // flagged. A confirmed-malicious version needs no further proof, and one npm
     // no longer serves has no tarball to read.
     let tierReached: PackageVerdict['tierReached'] = 'metadata';
+    let review: LlmReview | undefined;
     if (pk && doc && scoreOf(signals) >= WARN_SCORE && !signals.some((s) => s.type === 'osv_malicious')) {
       const diff = await runDiffTier(pk, version);
       signals.push(...diff.signals);
       if (diff.failure) sourceFailures.push(diff.failure);
       if (diff.reached) tierReached = 'diff';
+
+      // Tier 3: the LLM reads the code behind the diff signals. Skipped (undefined)
+      // when there is nothing to show it or no key is set; never throws.
+      review = (await reviewDiff({
+        label,
+        signalTitles: signals.filter((s) => s.severity !== 'info').map((s) => s.title),
+        hunks: diff.hunks,
+      })) ?? undefined;
     }
 
     // Strongest evidence first, so the reasons behind a verdict read well
     signals.sort((a, b) => SEVERITY_WEIGHT[b.severity] - SEVERITY_WEIGHT[a.severity]);
     const score = scoreOf(signals);
+    let outcome = verdictFor(signals, score, sourceFailures);
+    if (review && shouldLower(outcome, signals, sourceFailures, review) && review.status === 'ok') {
+      outcome = 'allow';
+      review.loweredVerdict = true;
+    }
     const verdict: PackageVerdict = {
       name, version, integrity: integrityOf(doc),
-      verdict: verdictFor(signals, score, sourceFailures),
+      verdict: outcome,
       score, signals, tierReached,
       analyzedAt: new Date(now).toISOString(),
       fromCache: false, sourceFailures,
+      ...(allowlistedBy !== undefined ? { allowlistedBy } : {}),
+      ...(review ? { review } : {}),
     };
 
-    // Only a complete verdict is cached: one built without a source could
-    // under-report, and a cache hit would hide that. A removed version is left
-    // uncached too, in case it is (re)published later.
-    if (sourceFailures.length === 0) await writeCache(verdict);
+    // Cooldown-held verdicts are NOT cached: the hold exists precisely because
+    // the version is brand-new, and the cached verdict must not outlive the
+    // cooldown window. Once the version is old enough, the next call will re-run
+    // the full analysis (without a too_new signal) and cache that clean result.
+    // A failed LLM review is not cached either: it is usually a rate limit or
+    // outage, so the next call retries.
+    const hasCooldownSignal = signals.some((s) => s.type === 'too_new');
+    if (sourceFailures.length === 0 && !hasCooldownSignal && review?.status !== 'failed') await writeCache(verdict);
 
     return verdict;
   } catch (err) {
     return unchecked(name, version, `analysis-error: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
+
