@@ -21,6 +21,10 @@ import {
 const REGISTRY_BASE = 'https://registry.npmjs.org';
 const OSV_QUERY_API = 'https://api.osv.dev/v1/query';
 const FETCH_TIMEOUT_MS = 8000;
+// A cached verdict is re-derived after this long: OSV `MAL-` advisories are
+// usually published after a malicious version is already live, so an old
+// `allow` must not be trusted forever.
+const VERDICT_TTL_MS = 6 * 60 * 60 * 1000;
 
 export type Verdict = 'allow' | 'warn' | 'block';
 
@@ -51,9 +55,10 @@ export interface PackageVerdict {
   /** True when this came from package_verdicts instead of a fresh analysis. */
   fromCache: boolean;
   /**
-   * Signal sources that could not be reached (e.g. 'registry', 'osv'). Their
-   * signals are simply absent, not treated as "clean" — check this before
-   * trusting an 'allow' verdict.
+   * Signal sources that could not be reached (e.g. 'registry', 'osv'), plus
+   * 'version_not_found' when the registry answered but has no such version.
+   * Their signals are simply absent, not treated as "clean" — check this
+   * before trusting an 'allow' verdict.
    */
   sourceFailures: string[];
 }
@@ -209,6 +214,7 @@ async function readCache(name: string, version: string, integrity: string): Prom
       .eq('name', name).eq('version', version).eq('integrity', integrity)
       .maybeSingle();
     if (error || !data) return null;
+    if (Date.now() - Date.parse(data.analyzed_at) > VERDICT_TTL_MS) return null;
     return rowToVerdict(data);
   } catch {
     return null;
@@ -251,19 +257,37 @@ export function needsEscalation(v: PackageVerdict): boolean {
   return v.verdict !== 'allow';
 }
 
-export async function analyzePackage(name: string, version: string): Promise<PackageVerdict> {
+export async function analyzePackage(
+  name: string,
+  version: string,
+  opts: { integrity?: string } = {},
+): Promise<PackageVerdict> {
   const sourceFailures: string[] = [];
 
-  // The cache key needs the exact-version integrity, which only the registry
-  // has — so a first, cheap packument fetch always happens even on a cache
-  // hit. It's the OSV call (the slower, rate-limited one) that a hit skips.
+  // A caller that already knows the integrity (a lockfile records it) gets a
+  // cache hit with no registry call at all. It is only used to *read*: what is
+  // written below always comes from the registry, so a forged value can at
+  // worst match a verdict for the same bytes.
+  if (opts.integrity) {
+    const hit = await readCache(name, version, opts.integrity);
+    if (hit) return hit;
+  }
+
+  // Otherwise the cache key needs the exact-version integrity, which only the
+  // registry has — so a first packument fetch happens even on a cache hit.
+  // It's the OSV call (the slower, rate-limited one) that a hit skips.
   const pk = await fetchPackument(name);
   if (!pk) sourceFailures.push('registry');
   const doc = pk?.versions?.[version];
+  // Registry reachable but no such version (never existed, or unpublished —
+  // OSV can still know about it, so this is a marker, not an early return).
+  if (pk && !doc) sourceFailures.push('version_not_found');
   const integrity = integrityOf(doc);
 
-  const cached = await readCache(name, version, integrity);
-  if (cached) return { ...cached, sourceFailures };
+  if (integrity !== opts.integrity) {
+    const cached = await readCache(name, version, integrity);
+    if (cached) return { ...cached, sourceFailures };
+  }
 
   const now = Date.now();
   const signals: VerdictSignal[] = [];
@@ -314,11 +338,12 @@ export async function analyzePackage(name: string, version: string): Promise<Pac
     fromCache: false, sourceFailures,
   };
 
-  // Cache regardless of source failures — a partial-but-recorded verdict is
-  // still more honest than re-deriving it every call, and sourceFailures
-  // travels with it either way. Fire-and-forget: caching must never slow
-  // down the caller.
-  void writeCache(verdict);
+  // Only a complete verdict is cached. A partial one (OSV or the registry was
+  // unreachable) would otherwise be served later as a clean `allow` with its
+  // sourceFailures lost. Awaited: on serverless the function can be frozen the
+  // moment the response is sent, which would silently drop a fire-and-forget
+  // write and make every repeat call a full re-analysis.
+  if (sourceFailures.length === 0) await writeCache(verdict);
 
   return verdict;
 }
