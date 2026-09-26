@@ -9,7 +9,10 @@
     "lint": "eslint",
     "benchmark": "tsx scripts/benchmark/run.mts",
     "eval-verdicts": "tsx scripts/eval-verdicts.mjs",
-    "verify-diff": "tsx scripts/verify-diff.mts"
+    "verify-diff": "tsx scripts/verify-diff.mts",
+    "verify-sandbox": "tsx scripts/verify-sandbox.mts",
+    "sandbox-runner": "node sandbox-runner/server.mjs",
+    "sandbox-test": "tsx scripts/sandbox-test.mts"
   },
   "dependencies": {
     "@fontsource-variable/archivo": "^5.3.0",
